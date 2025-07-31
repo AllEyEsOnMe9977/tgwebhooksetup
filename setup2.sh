@@ -2,12 +2,12 @@
 ###############################################################################
 # new-tg-bot.sh — Telegram Bot Setup Script (robust, reliable, repeatable)
 # Author: You!
-# Version: 2.1 (2025-07-31)
+# Version: 2.2 (2025-07-31)
 ###############################################################################
 set -euo pipefail
 IFS=$'\n\t'
 
-VER="2.1"
+VER="2.2"
 NODE_LTS="lts/*"
 NGINX_SITE_DIR=/etc/nginx/sites-available
 NGINX_SITE_LINK=/etc/nginx/sites-enabled
@@ -110,7 +110,7 @@ apt-get install -y -qq certbot python3-certbot-nginx
 # ----------- DATABASE SERVER/USER CREATION ----------- #
 case "$DB_TYPE_SLUG" in
     mongodb)
-        msg "Installing MongoDB shell (mongo)…"
+        msg "Installing MongoDB shell (mongosh)…"
         apt-get install -y -qq mongodb-org-shell
 
         msg "Creating MongoDB user and test database…"
@@ -118,7 +118,6 @@ case "$DB_TYPE_SLUG" in
 use $DB_NAME
 db.createUser({user: "$DB_USER", pwd: "$DB_PASS", roles: [{role: "readWrite", db: "$DB_NAME"}]})
 EOF
-        ;;
         ;;
     mariadb|mysql)
         msg "Installing $DB_TYPE_SLUG server/client…"
@@ -457,3 +456,4 @@ Next steps:
 ══════════════════════════════════════════════════════════════════════
 EOF
 exit 0
+``
