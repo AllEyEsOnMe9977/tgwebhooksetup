@@ -217,7 +217,7 @@ app.use((req, res) => res.sendStatus(404));
 app.listen(PORT, () => console.log(`Bot is listening on port ${PORT}`));
 
 /* --- MariaDB integration (optional) --- */
-${DB_TYPE:-none} === "mariadb" ? (async () => {
+"${DB_TYPE:-none}" === "mariadb" ? (async () => {
   try {
     const { testDb } = await import('./db.js');
     const latest = await testDb();
