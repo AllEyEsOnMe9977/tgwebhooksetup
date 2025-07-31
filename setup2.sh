@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 ###############################################################################
-# new-tg-bot.sh — Robust Telegram Bot Bootstrapper
-# version 1.1 (2025-07-31)
+# new-tg-bot.sh — Robust Telegram Bot Bootstrapper (with Nginx 2-stage Certbot)
+# version 1.2 (2025-07-31)
 ###############################################################################
 set -euo pipefail
 IFS=$'\n\t'
 
-# ----------- GLOBALS ---------------- #
-VER="1.1"
+VER="1.2"
 NODE_LTS="lts/*"
 NGINX_SITE_DIR=/etc/nginx/sites-available
 NGINX_SITE_LINK=/etc/nginx/sites-enabled
@@ -204,16 +203,38 @@ console.log(await res.json());
 EOF
 npm i node-fetch@3 dotenv >/dev/null
 
-# ----------- NGINX CONFIG FIXED: Single server block, location / only -----------
+# ----------- 2-STAGE NGINX CONFIG FOR CERTBOT -----------
 SITE_CONF="$NGINX_SITE_DIR/$PROJECT_DIR.conf"
-msg "Configuring Nginx reverse proxy …"
+
+msg "Configuring Nginx (HTTP-only, for first certificate issuance) …"
+cat > "$SITE_CONF" <<EOF
+server {
+    listen 80;
+    server_name ${WEBHOOK_DOMAIN#https://};
+    location / { return 200 "ok"; }
+}
+EOF
+
+# Remove any old/conflicting Nginx site links for this domain
+for f in "$NGINX_SITE_LINK"/*; do
+    grep -q "${WEBHOOK_DOMAIN#https://}" "$f" 2>/dev/null && sudo rm "$f"
+done
+
+ln -sf "$SITE_CONF" "$NGINX_SITE_LINK/$PROJECT_DIR.conf"
+nginx -t || { die "Nginx test failed (HTTP challenge setup)."; }
+systemctl reload nginx
+
+msg "Requesting Let’s Encrypt certificate (step 1, HTTP-only) …"
+certbot --nginx -d "${WEBHOOK_DOMAIN#https://}" --non-interactive --agree-tos -m admin@"${WEBHOOK_DOMAIN#https://}"
+
+# ----------- Now overwrite with full HTTP+HTTPS config -----------
+msg "Writing final HTTPS Nginx config …"
 cat > "$SITE_CONF" <<EOF
 server {
     listen 80;
     server_name ${WEBHOOK_DOMAIN#https://};
     return 301 https://\$host\$request_uri;
 }
-
 server {
     listen 443 ssl http2;
     server_name ${WEBHOOK_DOMAIN#https://};
@@ -229,7 +250,6 @@ server {
     add_header X-XSS-Protection "1; mode=block";
     add_header Referrer-Policy "strict-origin-when-cross-origin";
 
-    # ALL requests (including /bot<token>) go to Node.js
     location / {
         proxy_pass         http://127.0.0.1:$PORT;
         proxy_http_version 1.1;
@@ -242,18 +262,8 @@ server {
     }
 }
 EOF
-
-# Remove any old/conflicting Nginx site links for this domain
-for f in "$NGINX_SITE_LINK"/*; do
-    grep -q "${WEBHOOK_DOMAIN#https://}" "$f" 2>/dev/null && sudo rm "$f"
-done
-
-ln -sf "$SITE_CONF" "$NGINX_SITE_LINK/$PROJECT_DIR.conf"
-nginx -t || { die "Nginx test failed."; }
+nginx -t || { die "Nginx test failed (after certbot)."; }
 systemctl reload nginx
-
-msg "Requesting Let’s Encrypt certificate …"
-certbot --nginx -d "${WEBHOOK_DOMAIN#https://}" --non-interactive --agree-tos -m admin@"${WEBHOOK_DOMAIN#https://}"
 
 # ----------- PM2 PROCESS MANAGEMENT -----------
 read -rp "Start the bot now with PM2 and enable boot‑start? (Y/n): " PM2_START
