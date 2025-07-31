@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 ###############################################################################
-# new-tg-bot.sh — Modular Telegram Bot Bootstrapper (Production Logging)
-# Version: 3.1 (2025-07-31)
+# new-tg-bot.sh — Modular Telegram Bot Bootstrapper (Final, Production Grade)
+# Version: 3.2 (2025-07-31)
 ###############################################################################
 
-# Custom fail handler
 fail() {
     local code=$? cmd="${BASH_COMMAND:-}"
     echo -e "\e[31m[ERROR]\e[0m Command failed: $cmd (exit code $code) at line $BASH_LINENO"
@@ -14,7 +13,7 @@ trap fail ERR
 set -uo pipefail
 IFS=$'\n\t'
 
-VER="3.1"
+VER="3.2"
 NODE_LTS="lts/*"
 NGINX_SITE_DIR=/etc/nginx/sites-available
 NGINX_SITE_LINK=/etc/nginx/sites-enabled
@@ -283,8 +282,6 @@ export async function getTestEntry(db) {
         throw e;
     }
 }
-
-// Add more helpers as needed!
 EOF
 
 cat > db/main.js <<'EOF'
@@ -295,10 +292,9 @@ const { DB_TYPE, DB_NAME, DB_USER, DB_PASS } = process.env;
 import { createSchema } from "./schema.js";
 import logger from "../src/logger.js";
 
-let db, client;
-
 export async function connectDB() {
     try {
+        let db, client;
         if (DB_TYPE === "mongodb") {
             const { MongoClient } = await import("mongodb");
             client = new MongoClient(`mongodb://localhost:27017`, { useUnifiedTopology: true });
@@ -325,7 +321,7 @@ export async function connectDB() {
     }
 }
 
-export async function closeDB() {
+export async function closeDB(client) {
     try {
         if (client) await client.close?.() || client.end?.();
         logger.info("DB connection closed.");
@@ -360,9 +356,9 @@ export function setupBot(bot, type = "telegram-api", ADMIN_ID = "0") {
             if (arg === "db") {
                 try {
                     const dbModule = await import("../db/main.js");
-                    await dbModule.connectDB();
-                    const entry = await getTestEntry(dbModule.db);
-                    await dbModule.closeDB();
+                    const { db, client } = await dbModule.connectDB();
+                    const entry = await getTestEntry(db);
+                    await dbModule.closeDB(client);
                     bot.sendMessage(msg.chat.id, "DB test entry: " + JSON.stringify(entry));
                 } catch (e) {
                     logger.error("Admin /db failed: " + e.message, e);
@@ -386,9 +382,9 @@ export function setupBot(bot, type = "telegram-api", ADMIN_ID = "0") {
             }
             try {
                 const dbModule = await import("../db/main.js");
-                await dbModule.connectDB();
-                const entry = await getTestEntry(dbModule.db);
-                await dbModule.closeDB();
+                const { db, client } = await dbModule.connectDB();
+                const entry = await getTestEntry(db);
+                await dbModule.closeDB(client);
                 ctx.reply("DB test entry: " + JSON.stringify(entry));
             } catch (e) {
                 logger.error("Admin /admin_db failed: " + e.message, e);
