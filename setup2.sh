@@ -345,6 +345,11 @@ server {
     add_header Referrer-Policy "strict-origin-when-cross-origin";
 
     location / {
+        # Allow only Telegram IPs
+        allow 149.154.160.0/20;
+        allow 91.108.4.0/22;
+        deny all;
+
         proxy_pass         http://127.0.0.1:$PORT;
         proxy_http_version 1.1;
         proxy_set_header   Upgrade \$http_upgrade;
