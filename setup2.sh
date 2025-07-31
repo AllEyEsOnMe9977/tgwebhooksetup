@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 ###############################################################################
-# new-tg-bot.sh — Modular Telegram Bot Bootstrapper (2025-07-31)
-# Version: 3.0
+# new-tg-bot.sh — Modular Telegram Bot Bootstrapper (Production Logging)
+# Version: 3.1 (2025-07-31)
 ###############################################################################
 
 # Custom fail handler
@@ -11,11 +11,10 @@ fail() {
 }
 trap fail ERR
 
-# Not exiting on error (set -e removed), but still strict on unset vars
 set -uo pipefail
 IFS=$'\n\t'
 
-VER="3.0"
+VER="3.1"
 NODE_LTS="lts/*"
 NGINX_SITE_DIR=/etc/nginx/sites-available
 NGINX_SITE_LINK=/etc/nginx/sites-enabled
@@ -141,9 +140,10 @@ EOF
         ;;
 esac
 
-# ----------- PROJECT SCAFFOLD ----------- #
+# ----------- PROJECT SCAFFOLD & LOGGING FOLDER ----------- #
 msg "Creating project at $PROJECT_PATH …"
-mkdir -p "$PROJECT_PATH/db" "$PROJECT_PATH/src"
+mkdir -p "$PROJECT_PATH/db" "$PROJECT_PATH/src" "$PROJECT_PATH/logs"
+chmod 700 "$PROJECT_PATH/logs"
 cd "$PROJECT_PATH"
 
 cat > .env <<EOF
@@ -156,6 +156,7 @@ DB_TYPE="$DB_TYPE_SLUG"
 DB_NAME="$DB_NAME"
 DB_USER="$DB_USER"
 DB_PASS="$DB_PASS"
+LOG_DIR="./logs"
 EOF
 chmod 600 .env
 
@@ -172,6 +173,8 @@ cat > package.json <<'EOF'
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "node-fetch": "^3.3.2",
+    "winston": "^3.14.2",
+    "winston-daily-rotate-file": "^4.7.1",
     "mongodb": "^5.8.0",
     "mysql2": "^3.9.7",
     "telegraf": "^4.15.2",
@@ -180,28 +183,80 @@ cat > package.json <<'EOF'
 }
 EOF
 
+# ----------- LOGGER MODULE ----------- #
+cat > src/logger.js <<'EOF'
+import winston from "winston";
+import "winston-daily-rotate-file";
+import dotenv from "dotenv";
+dotenv.config();
+
+const logDir = process.env.LOG_DIR || "./logs";
+
+const fileRotateTransport = new winston.transports.DailyRotateFile({
+  filename: `${logDir}/bot-%DATE%.log`,
+  datePattern: "YYYY-MM-DD",
+  zippedArchive: true,
+  maxSize: "10m",
+  maxFiles: "14d",
+  level: "info"
+});
+const errorRotateTransport = new winston.transports.DailyRotateFile({
+  filename: `${logDir}/error-%DATE%.log`,
+  datePattern: "YYYY-MM-DD",
+  zippedArchive: true,
+  maxSize: "10m",
+  maxFiles: "30d",
+  level: "error"
+});
+
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format.timestamp({format: "YYYY-MM-DD HH:mm:ss"}),
+    winston.format.errors({stack: true}),
+    winston.format.printf(info =>
+      `[${info.timestamp}] [${info.level.toUpperCase()}] ${info.message}` +
+      (info.stack ? "\n" + info.stack : "")
+    )
+  ),
+  transports: [
+    new winston.transports.Console({ format: winston.format.simple() }),
+    fileRotateTransport,
+    errorRotateTransport
+  ],
+  exitOnError: false
+});
+
+export default logger;
+EOF
+
 # ----------- DB MODULES ----------- #
 cat > db/schema.js <<'EOF'
 import dotenv from "dotenv";
 dotenv.config();
 const { DB_TYPE } = process.env;
+import logger from "../src/logger.js";
 
-// Returns schema/DDL function for DB init
 export async function createSchema(db) {
-    if (DB_TYPE === "mongodb") {
-        // MongoDB: ensure collection exists
-        await db.createCollection("test_collection").catch(() => {});
-        await db.collection("test_collection").insertOne({ test: "ok", at: new Date() });
-    } else {
-        // SQL: create table if needed
-        await db.execute(`
-            CREATE TABLE IF NOT EXISTS test_table (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                test VARCHAR(50),
-                created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        await db.execute("INSERT INTO test_table (test) VALUES ('ok')");
+    try {
+        if (DB_TYPE === "mongodb") {
+            await db.createCollection("test_collection").catch(() => {});
+            await db.collection("test_collection").insertOne({ test: "ok", at: new Date() });
+            logger.info("MongoDB schema initialized.");
+        } else {
+            await db.execute(`
+                CREATE TABLE IF NOT EXISTS test_table (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    test VARCHAR(50),
+                    created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            `);
+            await db.execute("INSERT INTO test_table (test) VALUES ('ok')");
+            logger.info("SQL schema initialized.");
+        }
+    } catch (e) {
+        logger.error("Schema creation failed: " + e.message, e);
+        throw e;
     }
 }
 EOF
@@ -210,17 +265,26 @@ cat > db/helpers.js <<'EOF'
 import dotenv from "dotenv";
 dotenv.config();
 const { DB_TYPE } = process.env;
+import logger from "../src/logger.js";
 
 export async function getTestEntry(db) {
-    if (DB_TYPE === "mongodb") {
-        return await db.collection("test_collection").findOne({}, { sort: { _id: -1 } });
-    } else {
-        const [rows] = await db.execute("SELECT * FROM test_table ORDER BY id DESC LIMIT 1");
-        return rows[0];
+    try {
+        if (DB_TYPE === "mongodb") {
+            const entry = await db.collection("test_collection").findOne({}, { sort: { _id: -1 } });
+            logger.info("Fetched MongoDB test entry.");
+            return entry;
+        } else {
+            const [rows] = await db.execute("SELECT * FROM test_table ORDER BY id DESC LIMIT 1");
+            logger.info("Fetched SQL test entry.");
+            return rows[0];
+        }
+    } catch (e) {
+        logger.error("getTestEntry failed: " + e.message, e);
+        throw e;
     }
 }
 
-// Add more helper funcs as needed for your bot!
+// Add more helpers as needed!
 EOF
 
 cat > db/main.js <<'EOF'
@@ -229,33 +293,45 @@ dotenv.config();
 
 const { DB_TYPE, DB_NAME, DB_USER, DB_PASS } = process.env;
 import { createSchema } from "./schema.js";
+import logger from "../src/logger.js";
 
 let db, client;
 
 export async function connectDB() {
-    if (DB_TYPE === "mongodb") {
-        const { MongoClient } = await import("mongodb");
-        client = new MongoClient(`mongodb://localhost:27017`, { useUnifiedTopology: true });
-        await client.connect();
-        db = client.db(DB_NAME);
-    } else if (DB_TYPE === "mysql" || DB_TYPE === "mariadb") {
-        const mysql = await import("mysql2/promise");
-        client = await mysql.createConnection({
-            host: "localhost",
-            user: DB_USER,
-            password: DB_PASS,
-            database: DB_NAME,
-        });
-        db = client;
-    } else {
-        throw new Error("Unknown DB_TYPE: " + DB_TYPE);
+    try {
+        if (DB_TYPE === "mongodb") {
+            const { MongoClient } = await import("mongodb");
+            client = new MongoClient(`mongodb://localhost:27017`, { useUnifiedTopology: true });
+            await client.connect();
+            db = client.db(DB_NAME);
+        } else if (DB_TYPE === "mysql" || DB_TYPE === "mariadb") {
+            const mysql = await import("mysql2/promise");
+            client = await mysql.createConnection({
+                host: "localhost",
+                user: DB_USER,
+                password: DB_PASS,
+                database: DB_NAME,
+            });
+            db = client;
+        } else {
+            throw new Error("Unknown DB_TYPE: " + DB_TYPE);
+        }
+        await createSchema(db);
+        logger.info("DB connected and schema initialized.");
+        return { db, client };
+    } catch (e) {
+        logger.error("DB connection failed: " + e.message, e);
+        throw e;
     }
-    await createSchema(db);
-    return { db, client };
 }
 
 export async function closeDB() {
-    if (client) await client.close?.() || client.end?.();
+    try {
+        if (client) await client.close?.() || client.end?.();
+        logger.info("DB connection closed.");
+    } catch (e) {
+        logger.error("Error closing DB: " + e.message, e);
+    }
 }
 EOF
 
@@ -265,17 +341,19 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import { getTestEntry } from "../db/helpers.js";
+import logger from "./logger.js";
 
 export function setupBot(bot, type = "telegram-api", ADMIN_ID = "0") {
-    // Default command: /start
     if (type === "telegram-api") {
         bot.onText(/\/start/, async msg => {
+            logger.info(`/start from ${msg.from.username || msg.from.id}`);
             bot.sendMessage(msg.chat.id, '👋 Welcome! Use /admin db for DB test.');
         });
 
-        // Admin commands
         bot.onText(/\/admin (.+)/, async (msg, match) => {
+            logger.info(`/admin ${match[1]} from ${msg.from.username || msg.from.id}`);
             if (ADMIN_ID && String(msg.from.id) !== ADMIN_ID && ADMIN_ID !== "0") {
+                logger.warn("Unauthorized admin attempt: " + msg.from.id);
                 return bot.sendMessage(msg.chat.id, "🚫 Not authorized.");
             }
             const arg = match[1];
@@ -287,6 +365,7 @@ export function setupBot(bot, type = "telegram-api", ADMIN_ID = "0") {
                     await dbModule.closeDB();
                     bot.sendMessage(msg.chat.id, "DB test entry: " + JSON.stringify(entry));
                 } catch (e) {
+                    logger.error("Admin /db failed: " + e.message, e);
                     bot.sendMessage(msg.chat.id, "❌ DB error: " + e.message);
                 }
             } else {
@@ -294,11 +373,15 @@ export function setupBot(bot, type = "telegram-api", ADMIN_ID = "0") {
             }
         });
     } else {
-        // Telegraf style
-        bot.start(ctx => ctx.reply('👋 Welcome! Use /admin_db for DB test.'));
+        bot.start(ctx => {
+            logger.info(`/start from ${ctx.from.username || ctx.from.id}`);
+            ctx.reply('👋 Welcome! Use /admin_db for DB test.');
+        });
 
         bot.command("admin_db", async ctx => {
+            logger.info(`/admin_db from ${ctx.from.username || ctx.from.id}`);
             if (ADMIN_ID && String(ctx.from.id) !== ADMIN_ID && ADMIN_ID !== "0") {
+                logger.warn("Unauthorized admin attempt: " + ctx.from.id);
                 return ctx.reply("🚫 Not authorized.");
             }
             try {
@@ -308,6 +391,7 @@ export function setupBot(bot, type = "telegram-api", ADMIN_ID = "0") {
                 await dbModule.closeDB();
                 ctx.reply("DB test entry: " + JSON.stringify(entry));
             } catch (e) {
+                logger.error("Admin /admin_db failed: " + e.message, e);
                 ctx.reply("❌ DB error: " + e.message);
             }
         });
@@ -323,6 +407,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import express from 'express';
 import * as dotenv from 'dotenv';
 import { setupBot } from './bot.js';
+import logger from './logger.js';
 dotenv.config();
 
 const { BOT_TOKEN, PORT, ADMIN_ID } = process.env;
@@ -334,11 +419,12 @@ setupBot(bot, "telegram-api", ADMIN_ID);
 
 if (ADMIN_ID && ADMIN_ID !== '0') bot.sendMessage(ADMIN_ID, '🚀 Bot started');
 
-export default bot;
-
 app.post(`/bot${BOT_TOKEN}`, (req, res) => { bot.processUpdate(req.body); res.sendStatus(200); });
 app.use((req, res) => res.sendStatus(404));
-app.listen(PORT, () => console.log(`Bot is listening on port ${PORT}`));
+app.listen(PORT, () => logger.info(`Bot is listening on port ${PORT}`));
+
+process.on('uncaughtException', err => logger.error("Uncaught Exception: " + err.message, err));
+process.on('unhandledRejection', err => logger.error("Unhandled Rejection: " + err, err));
 EOF
 
 else
@@ -348,11 +434,12 @@ import express from 'express';
 import { Telegraf } from 'telegraf';
 import * as dotenv from 'dotenv';
 import { setupBot } from './bot.js';
+import logger from './logger.js';
 dotenv.config();
 
 const { BOT_TOKEN, PORT, WEBHOOK_DOMAIN, ADMIN_ID } = process.env;
 if (!BOT_TOKEN || !WEBHOOK_DOMAIN || !PORT) {
-  console.error('❌ Missing .env values.');
+  logger.error('❌ Missing .env values.');
   process.exit(1);
 }
 const bot = new Telegraf(BOT_TOKEN);
@@ -361,7 +448,7 @@ setupBot(bot, "telegraf", ADMIN_ID);
 if (ADMIN_ID && ADMIN_ID !== '0') {
   bot.telegram
     .sendMessage(ADMIN_ID, `🚀 Bot started at ${new Date().toISOString()}`)
-    .catch(err => console.error('Admin notify error:', err));
+    .catch(err => logger.error('Admin notify error:', err));
 }
 
 const app = express();
@@ -369,13 +456,14 @@ app.use(express.json());
 
 app.post(`/bot${BOT_TOKEN}`, bot.webhookCallback(`/bot${BOT_TOKEN}`));
 app.use((req, res) => {
-  console.warn(`⚠️ Unmatched ${req.method} ${req.path}`);
+  logger.warn(`⚠️ Unmatched ${req.method} ${req.path}`);
   res.sendStatus(404);
 });
 
-app.listen(PORT, () => {
-  console.log(`⚡️ Express listening on port ${PORT}`);
-});
+app.listen(PORT, () => logger.info(`Bot is listening on port ${PORT}`));
+
+process.on('uncaughtException', err => logger.error("Uncaught Exception: " + err.message, err));
+process.on('unhandledRejection', err => logger.error("Unhandled Rejection: " + err, err));
 EOF
 fi
 
@@ -383,13 +471,21 @@ fi
 cat > setWebhook.js <<'EOF'
 import fetch from 'node-fetch';
 import * as dotenv from 'dotenv';
+import logger from './src/logger.js';
 dotenv.config();
 const { BOT_TOKEN, WEBHOOK_DOMAIN } = process.env;
 const setHookURL = `https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${WEBHOOK_DOMAIN}/bot${BOT_TOKEN}`;
-const res = await fetch(setHookURL);
-console.log(await res.json());
+try {
+    const res = await fetch(setHookURL);
+    const data = await res.json();
+    logger.info("SetWebhook response: " + JSON.stringify(data));
+    console.log(data);
+} catch (e) {
+    logger.error("SetWebhook failed: " + e.message, e);
+    process.exit(1);
+}
 EOF
-npm i node-fetch@3 dotenv >/dev/null
+npm i node-fetch@3 dotenv winston winston-daily-rotate-file >/dev/null
 
 # ----------- 2-STAGE NGINX CONFIG FOR CERTBOT ----------- #
 SITE_CONF="$NGINX_SITE_DIR/$PROJECT_DIR.conf"
@@ -477,12 +573,14 @@ Node.js port      : $PORT
 Webhook URL       : $WEBHOOK_DOMAIN/bot$BOT_TOKEN
 Nginx conf        : $SITE_CONF
 .ENV file         : $(realpath .env)
+Logs dir          : $PROJECT_PATH/logs
 PM2 process name  : $PROJECT_DIR
 Database type     : $DB_TYPE_SLUG
 DB name/user      : $DB_NAME / $DB_USER
 
 Next steps:
   • Edit src/bot.js to extend bot logic (modular commands/handlers).
+  • All logs: $PROJECT_PATH/logs (bot-YYYY-MM-DD.log, error-YYYY-MM-DD.log)
   • If you change the domain or token, run "npm run sethook" again.
   • Use "pm2 logs $PROJECT_DIR" to follow live logs.
   • Use "pm2 restart $PROJECT_DIR" after code changes (auto‑reload if --watch).
