@@ -299,8 +299,21 @@ create_project() {
     mkdir -p "$PROJECT_PATH"
     cd "$PROJECT_PATH"
     
-    # Initialize npm project
-    npm init -y
+    # Create a basic package.json manually to avoid npm init issues
+    cat > package.json << EOF
+{
+  "name": "$PROJECT_NAME",
+  "version": "1.0.0",
+  "description": "Telegram bot created with automated setup script",
+  "main": "bot.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["telegram", "bot", "nodejs"],
+  "author": "",
+  "license": "MIT"
+}
+EOF
     
     # Install dependencies based on API library choice
     case $API_LIBRARY in
