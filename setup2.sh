@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 ###############################################################################
-# new-tg-bot.sh — Telegram Bot Setup Script (robust, reliable, repeatable)
-# Author: You!
-# Version: 2.2 (2025-07-31)
+# new-tg-bot.sh — Modular Telegram Bot Bootstrapper (2025-07-31)
+# Version: 3.0
 ###############################################################################
-set -euo pipefail
+
+# Custom fail handler
+fail() {
+    local code=$? cmd="${BASH_COMMAND:-}"
+    echo -e "\e[31m[ERROR]\e[0m Command failed: $cmd (exit code $code) at line $BASH_LINENO"
+}
+trap fail ERR
+
+# Not exiting on error (set -e removed), but still strict on unset vars
+set -uo pipefail
 IFS=$'\n\t'
 
-VER="2.2"
+VER="3.0"
 NODE_LTS="lts/*"
 NGINX_SITE_DIR=/etc/nginx/sites-available
 NGINX_SITE_LINK=/etc/nginx/sites-enabled
@@ -24,7 +32,7 @@ validate_domain() { local d=$1; [[ $d =~ ^https://[a-zA-Z0-9.-]+$ ]]; }
 validate_token() { local t=$1; [[ $t =~ ^[0-9]{6,10}:[A-Za-z0-9_-]{35}$ ]]; }
 
 need_root
-msg "🌐  Telegram Bot Bootstrapper v$VER"
+msg "🌐  Modular Telegram Bot Bootstrapper v$VER"
 echo "Answer the following questions. Default values are shown in [brackets]."
 
 read -rp "1) Telegram bot token: " BOT_TOKEN
@@ -89,42 +97,42 @@ pause
 
 # ----------- SYSTEM SETUP ----------- #
 msg "Updating system packages …"
-apt-get update -qq && apt-get dist-upgrade -y -qq
+apt-get update -qq && apt-get dist-upgrade -y -qq || warn "System update failed"
 
-if ! command_exists curl; then apt-get install -y -qq curl; fi
-if ! command_exists gnupg; then apt-get install -y -qq gnupg ca-certificates; fi
+if ! command_exists curl; then apt-get install -y -qq curl || warn "curl install failed"; fi
+if ! command_exists gnupg; then apt-get install -y -qq gnupg ca-certificates || warn "gnupg install failed"; fi
 
 msg "Installing Node.js $NODE_LTS …"
-curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-apt-get install -y -qq nodejs build-essential
+curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - || warn "Node.js repo setup failed"
+apt-get install -y -qq nodejs build-essential || warn "Node.js install failed"
 
 msg "Installing PM2 globally …"
-npm install -g pm2 >/dev/null
+npm install -g pm2 >/dev/null || warn "PM2 install failed"
 
 msg "Installing / upgrading Nginx …"
-apt-get install -y -qq nginx
+apt-get install -y -qq nginx || warn "Nginx install failed"
 
 msg "Installing Certbot …"
-apt-get install -y -qq certbot python3-certbot-nginx
+apt-get install -y -qq certbot python3-certbot-nginx || warn "Certbot install failed"
 
 # ----------- DATABASE SERVER/USER CREATION ----------- #
 case "$DB_TYPE_SLUG" in
     mongodb)
         msg "Installing MongoDB shell (mongosh)…"
-        apt-get install -y -qq mongodb-org-shell
+        apt-get install -y -qq mongodb-org-shell || warn "mongosh install failed"
 
         msg "Creating MongoDB user and test database…"
-        mongosh <<EOF
+        mongosh <<EOF || warn "MongoDB user creation failed"
 use $DB_NAME
 db.createUser({user: "$DB_USER", pwd: "$DB_PASS", roles: [{role: "readWrite", db: "$DB_NAME"}]})
 EOF
         ;;
     mariadb|mysql)
         msg "Installing $DB_TYPE_SLUG server/client…"
-        apt-get install -y -qq $DB_TYPE_SLUG-server $DB_TYPE_SLUG-client
+        apt-get install -y -qq $DB_TYPE_SLUG-server $DB_TYPE_SLUG-client || warn "$DB_TYPE_SLUG install failed"
 
         msg "Creating $DB_TYPE_SLUG database and user…"
-        mysql -u root <<EOF
+        mysql -u root <<EOF || warn "DB user creation failed"
 CREATE DATABASE IF NOT EXISTS $DB_NAME;
 CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
 GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
@@ -135,7 +143,7 @@ esac
 
 # ----------- PROJECT SCAFFOLD ----------- #
 msg "Creating project at $PROJECT_PATH …"
-mkdir -p "$PROJECT_PATH"
+mkdir -p "$PROJECT_PATH/db" "$PROJECT_PATH/src"
 cd "$PROJECT_PATH"
 
 cat > .env <<EOF
@@ -165,19 +173,62 @@ cat > package.json <<'EOF'
     "express": "^4.19.2",
     "node-fetch": "^3.3.2",
     "mongodb": "^5.8.0",
-    "mysql2": "^3.9.7"
+    "mysql2": "^3.9.7",
+    "telegraf": "^4.15.2",
+    "node-telegram-bot-api": "^0.61.0"
   }
 }
 EOF
 
-mkdir -p src
+# ----------- DB MODULES ----------- #
+cat > db/schema.js <<'EOF'
+import dotenv from "dotenv";
+dotenv.config();
+const { DB_TYPE } = process.env;
 
-# ----------- db.js CREATION ----------- #
-cat > db.js <<'EOF'
-import dotenv from 'dotenv';
+// Returns schema/DDL function for DB init
+export async function createSchema(db) {
+    if (DB_TYPE === "mongodb") {
+        // MongoDB: ensure collection exists
+        await db.createCollection("test_collection").catch(() => {});
+        await db.collection("test_collection").insertOne({ test: "ok", at: new Date() });
+    } else {
+        // SQL: create table if needed
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS test_table (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                test VARCHAR(50),
+                created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        await db.execute("INSERT INTO test_table (test) VALUES ('ok')");
+    }
+}
+EOF
+
+cat > db/helpers.js <<'EOF'
+import dotenv from "dotenv";
+dotenv.config();
+const { DB_TYPE } = process.env;
+
+export async function getTestEntry(db) {
+    if (DB_TYPE === "mongodb") {
+        return await db.collection("test_collection").findOne({}, { sort: { _id: -1 } });
+    } else {
+        const [rows] = await db.execute("SELECT * FROM test_table ORDER BY id DESC LIMIT 1");
+        return rows[0];
+    }
+}
+
+// Add more helper funcs as needed for your bot!
+EOF
+
+cat > db/main.js <<'EOF'
+import dotenv from "dotenv";
 dotenv.config();
 
 const { DB_TYPE, DB_NAME, DB_USER, DB_PASS } = process.env;
+import { createSchema } from "./schema.js";
 
 let db, client;
 
@@ -187,9 +238,6 @@ export async function connectDB() {
         client = new MongoClient(`mongodb://localhost:27017`, { useUnifiedTopology: true });
         await client.connect();
         db = client.db(DB_NAME);
-        // Create test collection and insert test doc
-        await db.collection("test_collection").insertOne({ test: "ok", at: new Date() });
-        return { type: "mongodb", db, client };
     } else if (DB_TYPE === "mysql" || DB_TYPE === "mariadb") {
         const mysql = await import("mysql2/promise");
         client = await mysql.createConnection({
@@ -198,32 +246,12 @@ export async function connectDB() {
             password: DB_PASS,
             database: DB_NAME,
         });
-        // Create sample table and insert row
-        await client.execute(`
-            CREATE TABLE IF NOT EXISTS test_table (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                test VARCHAR(50),
-                created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        await client.execute("INSERT INTO test_table (test) VALUES ('ok')");
         db = client;
-        return { type: DB_TYPE, db, client };
     } else {
         throw new Error("Unknown DB_TYPE: " + DB_TYPE);
     }
-}
-
-export async function testDB() {
-    if (DB_TYPE === "mongodb") {
-        const res = await db.collection("test_collection").findOne({});
-        return res;
-    } else if (DB_TYPE === "mysql" || DB_TYPE === "mariadb") {
-        const [rows] = await db.execute("SELECT * FROM test_table ORDER BY id DESC LIMIT 1");
-        return rows[0];
-    } else {
-        throw new Error("Unknown DB_TYPE: " + DB_TYPE);
-    }
+    await createSchema(db);
+    return { db, client };
 }
 
 export async function closeDB() {
@@ -231,14 +259,70 @@ export async function closeDB() {
 }
 EOF
 
-# ----------- INDEX.JS: DB INTEGRATION ----------- #
+# ----------- BOT MODULE (MODULAR) ----------- #
+cat > src/bot.js <<'EOF'
+import dotenv from "dotenv";
+dotenv.config();
+
+import { getTestEntry } from "../db/helpers.js";
+
+export function setupBot(bot, type = "telegram-api", ADMIN_ID = "0") {
+    // Default command: /start
+    if (type === "telegram-api") {
+        bot.onText(/\/start/, async msg => {
+            bot.sendMessage(msg.chat.id, '👋 Welcome! Use /admin db for DB test.');
+        });
+
+        // Admin commands
+        bot.onText(/\/admin (.+)/, async (msg, match) => {
+            if (ADMIN_ID && String(msg.from.id) !== ADMIN_ID && ADMIN_ID !== "0") {
+                return bot.sendMessage(msg.chat.id, "🚫 Not authorized.");
+            }
+            const arg = match[1];
+            if (arg === "db") {
+                try {
+                    const dbModule = await import("../db/main.js");
+                    await dbModule.connectDB();
+                    const entry = await getTestEntry(dbModule.db);
+                    await dbModule.closeDB();
+                    bot.sendMessage(msg.chat.id, "DB test entry: " + JSON.stringify(entry));
+                } catch (e) {
+                    bot.sendMessage(msg.chat.id, "❌ DB error: " + e.message);
+                }
+            } else {
+                bot.sendMessage(msg.chat.id, "Unknown admin command.");
+            }
+        });
+    } else {
+        // Telegraf style
+        bot.start(ctx => ctx.reply('👋 Welcome! Use /admin_db for DB test.'));
+
+        bot.command("admin_db", async ctx => {
+            if (ADMIN_ID && String(ctx.from.id) !== ADMIN_ID && ADMIN_ID !== "0") {
+                return ctx.reply("🚫 Not authorized.");
+            }
+            try {
+                const dbModule = await import("../db/main.js");
+                await dbModule.connectDB();
+                const entry = await getTestEntry(dbModule.db);
+                await dbModule.closeDB();
+                ctx.reply("DB test entry: " + JSON.stringify(entry));
+            } catch (e) {
+                ctx.reply("❌ DB error: " + e.message);
+            }
+        });
+    }
+}
+EOF
+
+# ----------- INDEX.JS: LOAD BOT AND DB ----------- #
 if [[ $LIBRARY_SLUG == "telegram-api" ]]; then
     npm i node-telegram-bot-api express dotenv >/dev/null
     cat > src/index.js <<'EOF'
 import TelegramBot from 'node-telegram-bot-api';
 import express from 'express';
 import * as dotenv from 'dotenv';
-import { connectDB, testDB } from '../db.js';
+import { setupBot } from './bot.js';
 dotenv.config();
 
 const { BOT_TOKEN, PORT, ADMIN_ID } = process.env;
@@ -246,27 +330,8 @@ const app = express();
 app.use(express.json());
 
 const bot = new TelegramBot(BOT_TOKEN, { webHook: { port: PORT } });
+setupBot(bot, "telegram-api", ADMIN_ID);
 
-connectDB()
-  .then(async () => {
-    const result = await testDB();
-    console.log("✅ DB Test OK:", result);
-  })
-  .catch(e => {
-    console.error("❌ DB setup error:", e);
-    process.exit(1);
-  });
-
-bot.onText(/\/start/, async msg => {
-    const chatId = msg.chat.id;
-    let dbTest = "";
-    try {
-        dbTest = JSON.stringify(await testDB());
-    } catch (e) {
-        dbTest = "DB ERROR: " + e.message;
-    }
-    bot.sendMessage(chatId, '👋 Bot ready! DB test: ' + dbTest);
-});
 if (ADMIN_ID && ADMIN_ID !== '0') bot.sendMessage(ADMIN_ID, '🚀 Bot started');
 
 export default bot;
@@ -282,7 +347,7 @@ else
 import express from 'express';
 import { Telegraf } from 'telegraf';
 import * as dotenv from 'dotenv';
-import { connectDB, testDB } from '../db.js';
+import { setupBot } from './bot.js';
 dotenv.config();
 
 const { BOT_TOKEN, PORT, WEBHOOK_DOMAIN, ADMIN_ID } = process.env;
@@ -291,37 +356,7 @@ if (!BOT_TOKEN || !WEBHOOK_DOMAIN || !PORT) {
   process.exit(1);
 }
 const bot = new Telegraf(BOT_TOKEN);
-
-connectDB()
-  .then(async () => {
-    const result = await testDB();
-    console.log("✅ DB Test OK:", result);
-  })
-  .catch(e => {
-    console.error("❌ DB setup error:", e);
-    process.exit(1);
-  });
-
-// Debug logger: show all incoming updates
-bot.use((ctx, next) => {
-  console.log('📥 Incoming update:', JSON.stringify(ctx.update, null, 2));
-  return next();
-});
-
-bot.start(async ctx => {
-  console.log('▶️ /start from', ctx.from.username || ctx.from.id);
-  let dbTest = "";
-  try {
-    dbTest = JSON.stringify(await testDB());
-  } catch (e) {
-    dbTest = "DB ERROR: " + e.message;
-  }
-  try {
-    await ctx.reply('👋 Bot ready! DB test: ' + dbTest);
-  } catch (err) {
-    console.error('Reply error:', err);
-  }
-});
+setupBot(bot, "telegraf", ADMIN_ID);
 
 if (ADMIN_ID && ADMIN_ID !== '0') {
   bot.telegram
@@ -344,6 +379,7 @@ app.listen(PORT, () => {
 EOF
 fi
 
+# ----------- setWebhook.js ----------- #
 cat > setWebhook.js <<'EOF'
 import fetch from 'node-fetch';
 import * as dotenv from 'dotenv';
@@ -357,7 +393,6 @@ npm i node-fetch@3 dotenv >/dev/null
 
 # ----------- 2-STAGE NGINX CONFIG FOR CERTBOT ----------- #
 SITE_CONF="$NGINX_SITE_DIR/$PROJECT_DIR.conf"
-# Remove any old configs for this domain/project
 sudo rm -f "$NGINX_SITE_DIR/$PROJECT_DIR.conf" "$NGINX_SITE_LINK/$PROJECT_DIR.conf"
 sudo rm -f "$NGINX_SITE_DIR/${WEBHOOK_DOMAIN#https://}.conf" "$NGINX_SITE_LINK/${WEBHOOK_DOMAIN#https://}.conf"
 
@@ -370,11 +405,11 @@ server {
 }
 EOF
 ln -sf "$SITE_CONF" "$NGINX_SITE_LINK/$PROJECT_DIR.conf"
-nginx -t || { die "Nginx test failed (HTTP-only, pre-certbot)."; }
-systemctl reload nginx
+nginx -t || warn "Nginx test failed (HTTP-only, pre-certbot)."
+systemctl reload nginx || warn "Nginx reload failed"
 
 msg "Requesting Let’s Encrypt certificate (HTTP-only stage) …"
-certbot --nginx -d "${WEBHOOK_DOMAIN#https://}" --non-interactive --agree-tos -m admin@"${WEBHOOK_DOMAIN#https://}"
+certbot --nginx -d "${WEBHOOK_DOMAIN#https://}" --non-interactive --agree-tos -m admin@"${WEBHOOK_DOMAIN#https://}" || warn "Certbot failed"
 
 msg "Writing final HTTPS Nginx config …"
 cat > "$SITE_CONF" <<EOF
@@ -409,16 +444,16 @@ server {
     }
 }
 EOF
-nginx -t || { die "Nginx test failed (after certbot)."; }
-systemctl reload nginx
+nginx -t || warn "Nginx test failed (after certbot)."
+systemctl reload nginx || warn "Nginx reload failed"
 
 # ----------- PM2 PROCESS MANAGEMENT ----------- #
 read -rp "Start the bot now with PM2 and enable boot‑start? (Y/n): " PM2_START
 PM2_START=${PM2_START,,}
 if [[ $PM2_START != "n" ]]; then
-    pm2 start src/index.js --name "$PROJECT_DIR" --watch --cwd "$PROJECT_PATH"
-    pm2 save
-    pm2 startup systemd -u "$(logname)" --hp "/home/$(logname)" >/dev/null
+    pm2 start src/index.js --name "$PROJECT_DIR" --watch --cwd "$PROJECT_PATH" || warn "PM2 start failed"
+    pm2 save || warn "PM2 save failed"
+    pm2 startup systemd -u "$(logname)" --hp "/home/$(logname)" >/dev/null || warn "PM2 startup failed"
 fi
 
 # ----------- RUN sethook ONLY after all is ready ----------- #
@@ -447,7 +482,7 @@ Database type     : $DB_TYPE_SLUG
 DB name/user      : $DB_NAME / $DB_USER
 
 Next steps:
-  • Edit src/index.js to add bot logic.
+  • Edit src/bot.js to extend bot logic (modular commands/handlers).
   • If you change the domain or token, run "npm run sethook" again.
   • Use "pm2 logs $PROJECT_DIR" to follow live logs.
   • Use "pm2 restart $PROJECT_DIR" after code changes (auto‑reload if --watch).
@@ -456,4 +491,3 @@ Next steps:
 ══════════════════════════════════════════════════════════════════════
 EOF
 exit 0
-``
