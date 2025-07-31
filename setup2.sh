@@ -215,20 +215,29 @@ server {
 }
 EOF
 
-# Remove any old/conflicting Nginx site links for this domain
-for f in "$NGINX_SITE_LINK"/*; do
-    grep -q "${WEBHOOK_DOMAIN#https://}" "$f" 2>/dev/null && sudo rm "$f"
-done
+# --- REMOVE any old configs for this domain ---
+sudo rm -f "$NGINX_SITE_DIR/$PROJECT_DIR.conf" "$NGINX_SITE_LINK/$PROJECT_DIR.conf"
+sudo rm -f "$NGINX_SITE_DIR/${WEBHOOK_DOMAIN#https://}.conf" "$NGINX_SITE_LINK/${WEBHOOK_DOMAIN#https://}.conf"
+sudo rm -f "$NGINX_SITE_LINK/default"
+
+# --- 1. HTTP-only config to allow Certbot to run ---
+cat > "$SITE_CONF" <<EOF
+server {
+    listen 80;
+    server_name ${WEBHOOK_DOMAIN#https://};
+    location / { return 200 "ok"; }
+}
+EOF
 
 ln -sf "$SITE_CONF" "$NGINX_SITE_LINK/$PROJECT_DIR.conf"
-nginx -t || { die "Nginx test failed (HTTP challenge setup)."; }
+nginx -t || { die "Nginx test failed (HTTP-only, pre-certbot)."; }
 systemctl reload nginx
 
+# --- 2. Issue certificate ---
 msg "Requesting Let’s Encrypt certificate (step 1, HTTP-only) …"
 certbot --nginx -d "${WEBHOOK_DOMAIN#https://}" --non-interactive --agree-tos -m admin@"${WEBHOOK_DOMAIN#https://}"
 
-# ----------- Now overwrite with full HTTP+HTTPS config -----------
-msg "Writing final HTTPS Nginx config …"
+# --- 3. Overwrite with real HTTPS config ---
 cat > "$SITE_CONF" <<EOF
 server {
     listen 80;
@@ -262,6 +271,7 @@ server {
     }
 }
 EOF
+
 nginx -t || { die "Nginx test failed (after certbot)."; }
 systemctl reload nginx
 
