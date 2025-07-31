@@ -433,30 +433,37 @@ import { setupBot } from './bot.js';
 import logger from './logger.js';
 dotenv.config();
 
-const { BOT_TOKEN, PORT, WEBHOOK_DOMAIN, ADMIN_ID } = process.env;
-if (!BOT_TOKEN || !WEBHOOK_DOMAIN || !PORT) {
-  logger.error('❌ Missing .env values.');
-  process.exit(1);
-}
-const bot = new Telegraf(BOT_TOKEN);
-setupBot(bot, "telegraf", ADMIN_ID);
+(async () => {
+  try {
+    const { BOT_TOKEN, PORT, WEBHOOK_DOMAIN, ADMIN_ID } = process.env;
+    if (!BOT_TOKEN || !WEBHOOK_DOMAIN || !PORT) {
+      logger.error('❌ Missing .env values.');
+      //process.exit(1); // Leave commented
+    }
+    const bot = new Telegraf(BOT_TOKEN);
+    setupBot(bot, "telegraf", ADMIN_ID);
 
-if (ADMIN_ID && ADMIN_ID !== '0') {
-  bot.telegram
-    .sendMessage(ADMIN_ID, `🚀 Bot started at ${new Date().toISOString()}`)
-    .catch(err => logger.error('Admin notify error:', err));
-}
+    if (ADMIN_ID && ADMIN_ID !== '0') {
+      bot.telegram
+        .sendMessage(ADMIN_ID, `🚀 Bot started at ${new Date().toISOString()}`)
+        .catch(err => logger.error('Admin notify error:', err));
+    }
 
-const app = express();
-app.use(express.json());
+    const app = express();
+    app.use(express.json());
 
-app.post(`/bot${BOT_TOKEN}`, bot.webhookCallback(`/bot${BOT_TOKEN}`));
-app.use((req, res) => {
-  logger.warn(`⚠️ Unmatched ${req.method} ${req.path}`);
-  res.sendStatus(404);
-});
+    app.post(`/bot${BOT_TOKEN}`, bot.webhookCallback(`/bot${BOT_TOKEN}`));
+    app.use((req, res) => {
+      logger.warn(`⚠️ Unmatched ${req.method} ${req.path}`);
+      res.sendStatus(404);
+    });
 
-app.listen(PORT, () => logger.info(`Bot is listening on port ${PORT}`));
+    app.listen(PORT, () => logger.info(`Bot is listening on port ${PORT}`));
+  } catch (err) {
+    logger.error("Fatal startup error: " + err.message, err);
+    // Don't exit, just log!
+  }
+})();
 
 process.on('uncaughtException', err => logger.error("Uncaught Exception: " + err.message, err));
 process.on('unhandledRejection', err => logger.error("Unhandled Rejection: " + err, err));
