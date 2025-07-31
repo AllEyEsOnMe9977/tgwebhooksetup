@@ -110,14 +110,15 @@ apt-get install -y -qq certbot python3-certbot-nginx
 # ----------- DATABASE SERVER/USER CREATION ----------- #
 case "$DB_TYPE_SLUG" in
     mongodb)
-        msg "Installing MongoDB client tools (if not present)…"
-        apt-get install -y -qq mongodb-clients
+        msg "Installing MongoDB shell (mongo)…"
+        apt-get install -y -qq mongodb-org-shell
 
         msg "Creating MongoDB user and test database…"
-        mongo <<EOF
+        mongosh <<EOF
 use $DB_NAME
 db.createUser({user: "$DB_USER", pwd: "$DB_PASS", roles: [{role: "readWrite", db: "$DB_NAME"}]})
 EOF
+        ;;
         ;;
     mariadb|mysql)
         msg "Installing $DB_TYPE_SLUG server/client…"
