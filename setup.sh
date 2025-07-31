@@ -925,11 +925,10 @@ setup_pm2() {
 update_package_scripts() {
     info_msg "Updating package.json scripts..."
     
-    # Read current package.json
-    local package_json=$(cat package.json)
-    
-    # Create new scripts section
-    local new_scripts='"scripts": {
+    # Create a temporary file with the new scripts
+    cat > temp_scripts.json << EOF
+{
+  "scripts": {
     "start": "node bot.js",
     "dev": "node dev.js",
     "setup-webhook": "node setup-webhook.js",
@@ -940,11 +939,22 @@ update_package_scripts() {
     "pm2:logs": "pm2 logs",
     "pm2:monit": "pm2 monit",
     "logs": "tail -f logs/combined.log",
-    "health": "curl http://localhost:'$SERVER_PORT'/health"
-  },'
+    "health": "curl http://localhost:$SERVER_PORT/health"
+  }
+}
+EOF
     
-    # Replace scripts section
-    echo "$package_json" | sed 's/"scripts": {[^}]*},/'"$new_scripts"'/' > package.json
+    # Use Node.js to properly merge the package.json files
+    node -e "
+    const fs = require('fs');
+    const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    const scripts = JSON.parse(fs.readFileSync('temp_scripts.json', 'utf8'));
+    pkg.scripts = scripts.scripts;
+    fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+    "
+    
+    # Clean up temporary file
+    rm temp_scripts.json
     
     success_msg "Package.json scripts updated"
 }
