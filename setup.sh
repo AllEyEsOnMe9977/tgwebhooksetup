@@ -829,7 +829,13 @@ configure_nginx() {
     info_msg "Configuring Nginx..."
     
     # Backup default config
-    sudo cp /etc/nginx/sites-available/default /etc/nginx/sites-available/default.backup
+    sudo cp /etc/nginx/sites-available/default /etc/nginx/sites-available/default.backup 2>/dev/null || true
+    
+    # First, add rate limiting zone to main nginx.conf if not already present
+    if ! grep -q "limit_req_zone.*webhook" /etc/nginx/nginx.conf; then
+        info_msg "Adding rate limiting configuration to nginx.conf..."
+        sudo sed -i '/http {/a\\t# Rate limiting for webhook\n\tlimit_req_zone $binary_remote_addr zone=webhook:10m rate=10r/s;' /etc/nginx/nginx.conf
+    fi
     
     # Create new site configuration
     sudo tee /etc/nginx/sites-available/$PROJECT_NAME << EOF
@@ -841,11 +847,10 @@ server {
     add_header X-Frame-Options DENY;
     add_header X-Content-Type-Options nosniff;
     add_header X-XSS-Protection "1; mode=block";
-    
-    # Rate limiting
-    limit_req_zone \$binary_remote_addr zone=webhook:10m rate=10r/s;
+    add_header Referrer-Policy "strict-origin-when-cross-origin";
     
     location $WEBHOOK_PATH {
+        # Rate limiting (zone defined in nginx.conf)
         limit_req zone=webhook burst=20 nodelay;
         
         proxy_pass http://127.0.0.1:$SERVER_PORT;
@@ -862,16 +867,32 @@ server {
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
+        
+        # Additional security
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Server \$host;
     }
     
     location /health {
         proxy_pass http://127.0.0.1:$SERVER_PORT;
         proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
     
     # Block direct access to other paths
     location / {
         return 404;
+    }
+    
+    # Additional security - block common attack paths
+    location ~ /\\.ht {
+        deny all;
+    }
+    
+    location ~ /\\.(git|svn) {
+        deny all;
     }
 }
 EOF
@@ -887,7 +908,21 @@ EOF
         sudo systemctl reload nginx
         success_msg "Nginx configuration updated successfully"
     else
-        error_exit "Nginx configuration test failed"
+        warn_msg "Nginx configuration test failed, checking error details..."
+        sudo nginx -t
+        
+        # Try to fix common issues
+        info_msg "Attempting to fix configuration..."
+        
+        # Remove rate limiting if it's causing issues
+        sudo sed -i '/limit_req zone=webhook/d' /etc/nginx/sites-available/$PROJECT_NAME
+        
+        if sudo nginx -t; then
+            sudo systemctl reload nginx
+            warn_msg "Nginx configured successfully but without rate limiting"
+        else
+            error_exit "Failed to configure Nginx properly"
+        fi
     fi
 }
 
