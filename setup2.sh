@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 ###############################################################################
-# new-tg-bot.sh — Robust Telegram Bot Bootstrapper (with Nginx 2-stage Certbot)
-# version 1.2 (2025-07-31)
+# new-tg-bot.sh — Telegram Bot Setup Script (robust, reliable, repeatable)
+# Author: You!
+# Version: 2.0 (2025-07-31)
 ###############################################################################
 set -euo pipefail
 IFS=$'\n\t'
 
-VER="1.2"
+VER="2.0"
 NODE_LTS="lts/*"
 NGINX_SITE_DIR=/etc/nginx/sites-available
 NGINX_SITE_LINK=/etc/nginx/sites-enabled
@@ -108,7 +109,6 @@ mkdir -p src
 
 if [[ $LIBRARY_SLUG == "telegram-api" ]]; then
     npm i node-telegram-bot-api express dotenv
-    # -------- Node-telegram-bot-api index.js --------
     cat > src/index.js <<'EOF'
 import TelegramBot from 'node-telegram-bot-api';
 import express from 'express';
@@ -132,7 +132,6 @@ EOF
 
 else
     npm i telegraf dotenv express
-    # -------- TELEGRAF index.js — With All Fixes --------
     cat > src/index.js <<EOF
 import express from 'express';
 import { Telegraf } from 'telegraf';
@@ -170,10 +169,7 @@ if (ADMIN_ID && ADMIN_ID !== '0') {
 const app = express();
 app.use(express.json());
 
-// ONLY intercept POSTs to exactly /bot<TOKEN>
 app.post(\`/bot\${BOT_TOKEN}\`, bot.webhookCallback(\`/bot\${BOT_TOKEN}\`));
-
-// EVERYTHING ELSE → 404
 app.use((req, res) => {
   console.warn(\`⚠️ Unmatched \${req.method} \${req.path}\`);
   res.sendStatus(404);
@@ -181,17 +177,10 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(\`⚡️ Express listening on port \${PORT}\`);
-  const url = \`\${WEBHOOK_DOMAIN}/bot\${BOT_TOKEN}\`;
-  bot.telegram
-    .setWebhook(url)
-    .then(() => console.log(\`✅ Webhook registered: \${url}\`))
-    .catch(err => console.error('❌ setWebhook error:', err));
 });
 EOF
-
 fi
 
-# ----------- Webhook setter utility -----------
 cat > setWebhook.js <<'EOF'
 import fetch from 'node-fetch';
 import * as dotenv from 'dotenv';
@@ -205,22 +194,11 @@ npm i node-fetch@3 dotenv >/dev/null
 
 # ----------- 2-STAGE NGINX CONFIG FOR CERTBOT -----------
 SITE_CONF="$NGINX_SITE_DIR/$PROJECT_DIR.conf"
-
-msg "Configuring Nginx (HTTP-only, for first certificate issuance) …"
-cat > "$SITE_CONF" <<EOF
-server {
-    listen 80;
-    server_name ${WEBHOOK_DOMAIN#https://};
-    location / { return 200 "ok"; }
-}
-EOF
-
-# --- REMOVE any old configs for this domain ---
+# Remove any old configs for this domain/project
 sudo rm -f "$NGINX_SITE_DIR/$PROJECT_DIR.conf" "$NGINX_SITE_LINK/$PROJECT_DIR.conf"
 sudo rm -f "$NGINX_SITE_DIR/${WEBHOOK_DOMAIN#https://}.conf" "$NGINX_SITE_LINK/${WEBHOOK_DOMAIN#https://}.conf"
-sudo rm -f "$NGINX_SITE_LINK/default"
 
-# --- 1. HTTP-only config to allow Certbot to run ---
+msg "Configuring Nginx (HTTP-only for Certbot)..."
 cat > "$SITE_CONF" <<EOF
 server {
     listen 80;
@@ -228,16 +206,14 @@ server {
     location / { return 200 "ok"; }
 }
 EOF
-
 ln -sf "$SITE_CONF" "$NGINX_SITE_LINK/$PROJECT_DIR.conf"
 nginx -t || { die "Nginx test failed (HTTP-only, pre-certbot)."; }
 systemctl reload nginx
 
-# --- 2. Issue certificate ---
-msg "Requesting Let’s Encrypt certificate (step 1, HTTP-only) …"
+msg "Requesting Let’s Encrypt certificate (HTTP-only stage) …"
 certbot --nginx -d "${WEBHOOK_DOMAIN#https://}" --non-interactive --agree-tos -m admin@"${WEBHOOK_DOMAIN#https://}"
 
-# --- 3. Overwrite with real HTTPS config ---
+msg "Writing final HTTPS Nginx config …"
 cat > "$SITE_CONF" <<EOF
 server {
     listen 80;
@@ -253,7 +229,6 @@ server {
     include             /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
 
-    # Security headers
     add_header X-Frame-Options DENY;
     add_header X-Content-Type-Options nosniff;
     add_header X-XSS-Protection "1; mode=block";
@@ -271,7 +246,6 @@ server {
     }
 }
 EOF
-
 nginx -t || { die "Nginx test failed (after certbot)."; }
 systemctl reload nginx
 
@@ -282,6 +256,17 @@ if [[ $PM2_START != "n" ]]; then
     pm2 start src/index.js --name "$PROJECT_DIR" --watch --cwd "$PROJECT_PATH"
     pm2 save
     pm2 startup systemd -u "$(logname)" --hp "/home/$(logname)" >/dev/null
+fi
+
+# ----------- RUN sethook ONLY after all is ready -----------
+msg "Registering webhook with Telegram (final step)…"
+WEBHOOK_RESULT=$(npm run sethook 2>&1 || true)
+echo "$WEBHOOK_RESULT"
+if echo "$WEBHOOK_RESULT" | grep -q '"ok":true'; then
+    msg "✅ Webhook successfully set!"
+else
+    warn "⚠️  Webhook registration failed. See above. Run again after DNS and HTTPS are fully ready:"
+    echo "    npm run sethook"
 fi
 
 cat <<EOF
@@ -298,10 +283,11 @@ PM2 process name  : $PROJECT_DIR
 
 Next steps:
   • Edit src/index.js to add bot logic.
-  • Run "npm run sethook" if you change the domain or token.
+  • If you change the domain or token, run "npm run sethook" again.
   • Use "pm2 logs $PROJECT_DIR" to follow live logs.
   • Use "pm2 restart $PROJECT_DIR" after code changes (auto‑reload if --watch).
   • Use "curl -vk -X POST \"$WEBHOOK_DOMAIN/bot$BOT_TOKEN\"" to test end-to-end.
+
 ══════════════════════════════════════════════════════════════════════
 EOF
 exit 0
