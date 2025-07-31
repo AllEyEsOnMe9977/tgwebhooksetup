@@ -1,65 +1,30 @@
 #!/usr/bin/env bash
 ###############################################################################
-#  new-tg-bot.sh — Interactive one‑shot bootstrapper for Telegram bot stacks
-#  Author : <you>
-#  Version: 1.0.0  (2025‑07‑31)
-#
-#  • Creates an opinionated, production‑ready Node.js project
-#  • Installs/updates system packages, Node.js LTS, Nginx, PM2, Certbot
-#  • Obtains a Let’s Encrypt certificate and configures secure reverse proxy
-#  • Scaffolds code for either “node‑telegram‑bot‑api” or “Telegraf”
-#  • Generates .env, webhook setter, systemd/PM2 files
-#  • Can self‑update   ( ./new-tg-bot.sh --self-update )
-#
-#  Tested on Ubuntu 20.04+ (but most functions are distro‑agnostic)
+# new-tg-bot.sh — Robust Telegram Bot Bootstrapper
+# version 1.1 (2025-07-31)
 ###############################################################################
-
 set -euo pipefail
 IFS=$'\n\t'
 
-#---------------------------  GLOBALS  --------------------------------------#
-VER="1.0.0"
-SCRIPT_NAME="$(basename "$0")"
-NODE_LTS="lts/*"           # “lts/*” resolves to latest LTS via NodeSource
+# ----------- GLOBALS ---------------- #
+VER="1.1"
+NODE_LTS="lts/*"
 NGINX_SITE_DIR=/etc/nginx/sites-available
 NGINX_SITE_LINK=/etc/nginx/sites-enabled
 COLOR_OK="\e[32m"; COLOR_WARN="\e[33m"; COLOR_ERR="\e[31m"; COLOR_CLEAR="\e[0m"
 
-#--------------------  UTILITY & SAFETY FUNCTIONS  --------------------------#
 msg()   { printf "%b[INFO ]%b %s\n"  "$COLOR_OK"   "$COLOR_CLEAR" "$*";  }
 warn()  { printf "%b[WARN ]%b %s\n"  "$COLOR_WARN" "$COLOR_CLEAR" "$*"; }
 die()   { printf "%b[ERROR]%b %s\n"  "$COLOR_ERR"  "$COLOR_CLEAR" "$*"; exit 1; }
 
 need_root() { [[ $EUID -eq 0 ]] || die "Run as root (use sudo)."; }
-
 command_exists() { command -v "$1" &>/dev/null; }
-
 pause() { read -rp "Press <Enter> to continue … "; }
+validate_domain() { local d=$1; [[ $d =~ ^https://[a-zA-Z0-9.-]+$ ]]; }
+validate_token() { local t=$1; [[ $t =~ ^[0-9]{6,10}:[A-Za-z0-9_-]{35}$ ]]; }
 
-validate_domain() {
-    local domain=$1
-    [[ $domain =~ ^https?://[a-zA-Z0-9.-]+$ ]] || return 1
-}
-
-validate_token() {
-    local token=$1
-    [[ $token =~ ^[0-9]{6,10}:[A-Za-z0-9_-]{35}$ ]] || return 1
-}
-
-#--------------------  SELF‑UPDATE (optional nicety) ------------------------#
-if [[ ${1:-} == "--self-update" ]]; then
-    need_root
-    if command_exists curl; then
-        curl -fsSL "https://raw.githubusercontent.com/yourrepo/$SCRIPT_NAME/main/$SCRIPT_NAME" \
-        -o "/usr/local/bin/$SCRIPT_NAME" && chmod +x "/usr/local/bin/$SCRIPT_NAME" \
-        && msg "Script updated." || die "Self‑update failed."
-        exit 0
-    else die "curl not found."; fi
-fi
-
-#--------------------  INTERACTIVE PROMPTS  ---------------------------------#
 need_root
-msg "🌐  Telegram Bot Environment Bootstrapper v$VER"
+msg "🌐  Telegram Bot Bootstrapper v$VER"
 echo "Answer the following questions. Default values are shown in [brackets]."
 
 read -rp "1) Telegram bot token: " BOT_TOKEN
@@ -68,7 +33,7 @@ validate_token "$BOT_TOKEN" || die "Token format invalid."
 default_domain="https://$(hostname -f)"
 read -rp "2) Public HTTPS domain for webhook [$default_domain]: " WEBHOOK_DOMAIN
 WEBHOOK_DOMAIN=${WEBHOOK_DOMAIN:-$default_domain}
-validate_domain "$WEBHOOK_DOMAIN" || die "Domain format invalid (include https://)"
+validate_domain "$WEBHOOK_DOMAIN" || die "Domain format invalid (MUST start with https://)"
 
 read -rp "3) Numeric Telegram admin user ID (optional): " ADMIN_ID
 ADMIN_ID=${ADMIN_ID:-0}
@@ -90,10 +55,6 @@ done
 read -rp "Custom port for Node.js (default 3000): " PORT
 PORT=${PORT:-3000}
 
-read -rp "Allow Nginx access only from Telegram IPs? (y/N): " TG_IP_RESTRICT
-TG_IP_RESTRICT=${TG_IP_RESTRICT,,}  # to lower
-[[ $TG_IP_RESTRICT == "y" ]] && RESTRICT_IPS=true || RESTRICT_IPS=false
-
 msg "Summary
 ────────────────────────────────
   Bot token         : $BOT_TOKEN
@@ -102,11 +63,10 @@ msg "Summary
   Project directory : $PROJECT_PATH
   Library           : $LIBRARY_SLUG
   Node.js port      : $PORT
-  Restrict to TG IP : $RESTRICT_IPS
 ────────────────────────────────"
 pause
 
-#--------------------  SYSTEM UPDATE & DEPENDENCIES -------------------------#
+# ----------- SYSTEM SETUP ----------- #
 msg "Updating system packages …"
 apt-get update -qq && apt-get dist-upgrade -y -qq
 
@@ -126,13 +86,13 @@ apt-get install -y -qq nginx
 msg "Installing Certbot …"
 apt-get install -y -qq certbot python3-certbot-nginx
 
-#--------------------  PROJECT SCAFFOLDING ----------------------------------#
+# ----------- PROJECT SCAFFOLD ----------- #
 msg "Creating project at $PROJECT_PATH …"
 mkdir -p "$PROJECT_PATH"
 cd "$PROJECT_PATH"
 
 cat > .env <<EOF
-# ==================  Generated $(date -Iseconds)  ==================
+# ========== Generated $(date -Iseconds) ==========
 BOT_TOKEN="$BOT_TOKEN"
 WEBHOOK_DOMAIN="$WEBHOOK_DOMAIN"
 PORT=$PORT
@@ -149,6 +109,7 @@ mkdir -p src
 
 if [[ $LIBRARY_SLUG == "telegram-api" ]]; then
     npm i node-telegram-bot-api express dotenv
+    # -------- Node-telegram-bot-api index.js --------
     cat > src/index.js <<'EOF'
 import TelegramBot from 'node-telegram-bot-api';
 import express from 'express';
@@ -163,32 +124,75 @@ const bot = new TelegramBot(BOT_TOKEN, { webHook: { port: PORT }});
 bot.onText(/\/start/, msg => bot.sendMessage(msg.chat.id, '👋 Bot ready!'));
 if (ADMIN_ID && ADMIN_ID !== '0') bot.sendMessage(ADMIN_ID, '🚀 Bot started');
 
-export default bot;   // allow import in other modules
+export default bot;
+
 app.post(`/bot${BOT_TOKEN}`, (req, res) => { bot.processUpdate(req.body); res.sendStatus(200); });
+app.use((req, res) => res.sendStatus(404));
 app.listen(PORT, () => console.log(`Bot is listening on port ${PORT}`));
 EOF
+
 else
     npm i telegraf dotenv express
-    cat > src/index.js <<'EOF'
-import { Telegraf } from 'telegraf';
+    # -------- TELEGRAF index.js — With All Fixes --------
+    cat > src/index.js <<EOF
 import express from 'express';
+import { Telegraf } from 'telegraf';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-const { BOT_TOKEN, PORT, ADMIN_ID } = process.env;
+const { BOT_TOKEN, PORT, WEBHOOK_DOMAIN, ADMIN_ID } = process.env;
+if (!BOT_TOKEN || !WEBHOOK_DOMAIN || !PORT) {
+  console.error('❌ Missing .env values.');
+  process.exit(1);
+}
 const bot = new Telegraf(BOT_TOKEN);
-bot.start(ctx => ctx.reply('👋 Bot ready!'));
-if (ADMIN_ID && ADMIN_ID !== '0') bot.telegram.sendMessage(ADMIN_ID, '🚀 Bot started');
+
+// Debug logger: show all incoming updates
+bot.use((ctx, next) => {
+  console.log('📥 Incoming update:', JSON.stringify(ctx.update, null, 2));
+  return next();
+});
+
+bot.start(async ctx => {
+  console.log('▶️ /start from', ctx.from.username || ctx.from.id);
+  try {
+    await ctx.reply('👋 Bot ready!');
+  } catch (err) {
+    console.error('Reply error:', err);
+  }
+});
+
+if (ADMIN_ID && ADMIN_ID !== '0') {
+  bot.telegram
+    .sendMessage(ADMIN_ID, \`🚀 Bot started at \${new Date().toISOString()}\`)
+    .catch(err => console.error('Admin notify error:', err));
+}
 
 const app = express();
 app.use(express.json());
-app.use(bot.webhookCallback(`/bot${BOT_TOKEN}`));
-bot.telegram.setWebhook(`${process.env.WEBHOOK_DOMAIN}/bot${BOT_TOKEN}`);
-app.listen(PORT, () => console.log(`Bot is listening on port ${PORT}`));
+
+// ONLY intercept POSTs to exactly /bot<TOKEN>
+app.post(\`/bot\${BOT_TOKEN}\`, bot.webhookCallback(\`/bot\${BOT_TOKEN}\`));
+
+// EVERYTHING ELSE → 404
+app.use((req, res) => {
+  console.warn(\`⚠️ Unmatched \${req.method} \${req.path}\`);
+  res.sendStatus(404);
+});
+
+app.listen(PORT, () => {
+  console.log(\`⚡️ Express listening on port \${PORT}\`);
+  const url = \`\${WEBHOOK_DOMAIN}/bot\${BOT_TOKEN}\`;
+  bot.telegram
+    .setWebhook(url)
+    .then(() => console.log(\`✅ Webhook registered: \${url}\`))
+    .catch(err => console.error('❌ setWebhook error:', err));
+});
 EOF
+
 fi
 
-# webhook setter utility
+# ----------- Webhook setter utility -----------
 cat > setWebhook.js <<'EOF'
 import fetch from 'node-fetch';
 import * as dotenv from 'dotenv';
@@ -200,57 +204,66 @@ console.log(await res.json());
 EOF
 npm i node-fetch@3 dotenv >/dev/null
 
-#--------------------  NGINX CONFIGURATION ----------------------------------#
-SITE_CONF="$NGINX_SITE_DIR/$PROJECT_DIR"
+# ----------- NGINX CONFIG FIXED: Single server block, location / only -----------
+SITE_CONF="$NGINX_SITE_DIR/$PROJECT_DIR.conf"
 msg "Configuring Nginx reverse proxy …"
 cat > "$SITE_CONF" <<EOF
 server {
     listen 80;
     server_name ${WEBHOOK_DOMAIN#https://};
+    return 301 https://\$host\$request_uri;
+}
 
-    location / {
-        proxy_pass         http://127.0.0.1:$PORT;
-        proxy_http_version 1.1;
-        proxy_set_header   Upgrade \$http_upgrade;
-        proxy_set_header   Connection 'upgrade';
-        proxy_set_header   Host \$host;
-        proxy_cache_bypass \$http_upgrade;
-    }
+server {
+    listen 443 ssl http2;
+    server_name ${WEBHOOK_DOMAIN#https://};
 
-    # Optional: only allow Telegram and your server to reach webhook
-    $( $RESTRICT_IPS && cat <<'BLOCK'
-    allow 149.154.160.0/20;    # Telegram IP ranges
-    allow 91.108.4.0/22;
-    deny all;
-BLOCK
-)
+    ssl_certificate     /etc/letsencrypt/live/${WEBHOOK_DOMAIN#https://}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${WEBHOOK_DOMAIN#https://}/privkey.pem;
+    include             /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
 
     # Security headers
     add_header X-Frame-Options DENY;
     add_header X-Content-Type-Options nosniff;
-    add_header Referrer-Policy no-referrer-when-downgrade;
+    add_header X-XSS-Protection "1; mode=block";
+    add_header Referrer-Policy "strict-origin-when-cross-origin";
+
+    # ALL requests (including /bot<token>) go to Node.js
+    location / {
+        proxy_pass         http://127.0.0.1:$PORT;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade \$http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_set_header   Host \$host;
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+    }
 }
 EOF
 
-ln -s "$SITE_CONF" "$NGINX_SITE_LINK/$PROJECT_DIR" || true
+# Remove any old/conflicting Nginx site links for this domain
+for f in "$NGINX_SITE_LINK"/*; do
+    grep -q "${WEBHOOK_DOMAIN#https://}" "$f" 2>/dev/null && sudo rm "$f"
+done
+
+ln -sf "$SITE_CONF" "$NGINX_SITE_LINK/$PROJECT_DIR.conf"
 nginx -t || { die "Nginx test failed."; }
 systemctl reload nginx
 
 msg "Requesting Let’s Encrypt certificate …"
 certbot --nginx -d "${WEBHOOK_DOMAIN#https://}" --non-interactive --agree-tos -m admin@"${WEBHOOK_DOMAIN#https://}"
 
-# Certbot installs a renewal timer automatically.
-
-#--------------------  PM2 PROCESS ------------------------------------------#
+# ----------- PM2 PROCESS MANAGEMENT -----------
 read -rp "Start the bot now with PM2 and enable boot‑start? (Y/n): " PM2_START
 PM2_START=${PM2_START,,}
 if [[ $PM2_START != "n" ]]; then
-    pm2 start src/index.js --name "$PROJECT_DIR" --watch
+    pm2 start src/index.js --name "$PROJECT_DIR" --watch --cwd "$PROJECT_PATH"
     pm2 save
     pm2 startup systemd -u "$(logname)" --hp "/home/$(logname)" >/dev/null
 fi
 
-#--------------------  SUMMARY ----------------------------------------------#
 cat <<EOF
 
 ══════════════════════════════════════════════════════════════════════
@@ -262,13 +275,13 @@ Webhook URL       : $WEBHOOK_DOMAIN/bot$BOT_TOKEN
 Nginx conf        : $SITE_CONF
 .ENV file         : $(realpath .env)
 PM2 process name  : $PROJECT_DIR
-SSL renewal       : handled by certbot.timer
 
 Next steps:
   • Edit src/index.js to add bot logic.
   • Run "npm run sethook" if you change the domain or token.
   • Use "pm2 logs $PROJECT_DIR" to follow live logs.
   • Use "pm2 restart $PROJECT_DIR" after code changes (auto‑reload if --watch).
+  • Use "curl -vk -X POST \"$WEBHOOK_DOMAIN/bot$BOT_TOKEN\"" to test end-to-end.
 ══════════════════════════════════════════════════════════════════════
 EOF
 exit 0
