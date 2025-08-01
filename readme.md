@@ -6,6 +6,7 @@
 
 ```bash
 cd /opt
+rm -rf tgwebhooksetup   # (optional, if you want a fresh start)
 git clone https://github.com/AllEyEsOnMe9977/tgwebhooksetup.git
 cd tgwebhooksetup
-bash ready_install.sh
+sudo bash install.sh    # not ready_install.sh!
