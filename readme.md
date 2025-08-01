@@ -1,6 +1,10 @@
-## 🚀 Installation
+# 🚀 Telegram Webhook Modular Bot Setup
 
-You can install and run the setup script directly with the following one-liner (no need to clone the repo):
+## Installation
+
+**Recommended method (reliable, supports modular folders):**
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/AllEyEsOnMe9977/tgwebhooksetup/main/install.sh)
+git clone https://github.com/AllEyEsOnMe9977/tgwebhooksetup.git
+cd tgwebhooksetup
+sudo bash install.sh
