@@ -13,14 +13,14 @@ export async function saveMessage(chatId, userId, username, text) {
   }
 }
 
-export async function getLastMessage() {
+export async function getLastMessages(n = 5) {
   let conn;
   try {
     conn = await pool.getConnection();
     const rows = await conn.query(
-      `SELECT * FROM messages ORDER BY id DESC LIMIT 1`
+      `SELECT * FROM messages ORDER BY id DESC LIMIT ?`, [n]
     );
-    return rows[0] || null;
+    return rows.reverse(); // oldest first
   } finally {
     if (conn) conn.release();
   }
