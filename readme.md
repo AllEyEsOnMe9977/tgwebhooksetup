@@ -5,6 +5,4 @@
 **Recommended method (reliable, supports modular folders):**
 
 ```bash
-git clone https://github.com/AllEyEsOnMe9977/tgwebhooksetup.git
-cd tgwebhooksetup
-sudo bash install.sh
+curl -sL https://raw.githubusercontent.com/AllEyEsOnMe9977/tgwebhooksetup/main/ready_install.sh | bash
