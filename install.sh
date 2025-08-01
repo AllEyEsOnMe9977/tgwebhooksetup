@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# new-tg-bot.sh — Telegram Bot Setup Script (separated Node.js templates)
+# install.sh — Telegram Bot Setup Script (separated Node.js templates)
 # Author: You!
 # Version: 2.0 (2025-07-31)
 ###############################################################################
