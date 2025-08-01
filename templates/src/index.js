@@ -3,6 +3,7 @@ import * as dotenv from 'dotenv';
 import { TelegramAPI } from './tg/api.js';
 import { ensureTables } from './db/schema.js';
 import { saveMessage, getLastMessages } from './db/message.js';
+import { UserStateManager } from './db/state.js';
 
 dotenv.config();
 
@@ -14,81 +15,106 @@ app.use(express.json());
 const tg = new TelegramAPI(BOT_TOKEN);
 const startedAt = new Date();
 
+// Helper to wrap any tg.* call in retry/fallback logic
+async function safeApiCall(fn, args = [], chatId = null, fallbackText = null) {
+  try {
+    return await fn(...args);
+  } catch (err) {
+    const msg = String(err);
+
+    // 1) Flood-wait: "retry after X" → wait and retry
+    const m = msg.match(/retry after (\d+)/i);
+    if (m) {
+      const wait = Number(m[1]);
+      console.warn(`[Telegram] Rate limited, retrying after ${wait}s…`);
+      await new Promise(r => setTimeout(r, wait * 1000));
+      return safeApiCall(fn, args, chatId, fallbackText);
+    }
+
+    // 2) Silently ignore some no-ops
+    if (
+      msg.includes('message is not modified') ||
+      msg.includes('message to delete not found')
+    ) {
+      console.info('[Telegram] No-op:', msg);
+      return;
+    }
+
+    // 3) All other errors—log and optionally notify
+    console.error('[Telegram] API error:', err);
+    if (chatId && fallbackText) {
+      try {
+        await tg.sendMessage(chatId, fallbackText);
+      } catch (_) {
+        // swallow
+      }
+    }
+  }
+}
+
 // Ensure DB schema on startup
 await ensureTables();
 
+// Webhook endpoint
 app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
   try {
     const update = req.body;
-    if (update.message && update.message.text) {
-      const msg = update.message;
-      const chatId = msg.chat.id;
-      const fromId = msg.from.id;
-      const username = msg.from.username || '';
-      const text = msg.text.trim();
 
-      // Save all messages as usual
-      await saveMessage(chatId, fromId, username, text);
-
-      // Admin-only commands
-      if (ADMIN_ID_INT && fromId === ADMIN_ID_INT) {
-        if (/^\/test\b/i.test(text)) {
-          const up = Math.floor((Date.now() - startedAt.getTime()) / 1000);
-          await tg.sendMessage(chatId, `✅ Bot is working!\nUptime: ${up} seconds.`);
-          return res.sendStatus(200);
-        }
-
-        if (/^\/last(\s+\d+)?$/i.test(text)) {
-          const n = parseInt((text.match(/^\/last\s+(\d+)$/i) || [])[1] || "5", 10);
-          const msgs = await getLastMessages(n);
-          if (!msgs.length) {
-            await tg.sendMessage(chatId, `No recent messages.`);
-          } else {
-            const out = msgs
-              .map(m => `[${m.created_at.toISOString().replace('T', ' ').substring(0, 19)}] ${m.username || m.user_id}: ${m.text}`)
-              .join('\n\n');
-            await tg.sendMessage(chatId, `Last ${msgs.length} messages:\n\n${out}`);
-          }
-          return res.sendStatus(200);
-        }
-      }
-    // Handle callback queries (inline buttons)
+    // ─── Handle callback queries ───────────────────────────────
     if (update.callback_query) {
       const cq = update.callback_query;
-      const user_id = Number(cq.from.id);
-      const chat_id = Number(cq.message.chat.id);
-      const message_id = Number(cq.message.message_id);
+      const userId = Number(cq.from.id);
+      const chatId = Number(cq.message.chat.id);
+      const messageId = Number(cq.message.message_id);
       const data = cq.data;
 
       if (data === 'to_submenu') {
-        await UserStateManager.setState(user_id, chat_id, "submenu", { at: new Date() }, message_id);
-        await tg.editMessageText(chat_id, message_id, "You are in the submenu.\n\nPress to go back.", {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "⬅️ Back to Main Menu", callback_data: "to_mainmenu" }]
-            ]
-          }
-        });
-        return res.sendStatus(200);
-      }
-      if (data === 'to_mainmenu') {
-        await UserStateManager.setState(user_id, chat_id, "menu", {}, message_id);
-        await tg.editMessageText(chat_id, message_id, "Main menu:\n\nChoose:", {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "Go to Submenu", callback_data: "to_submenu" }]
-            ]
-          }
-        });
+        await UserStateManager.setState(userId, chatId, 'submenu', { at: new Date() }, messageId);
+        await safeApiCall(
+          tg.editMessageText.bind(tg),
+          [chatId, messageId, 'You are in the submenu.\n\nPress to go back.', {
+            reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Main Menu', callback_data: 'to_mainmenu' }]] }
+          }],
+          chatId,
+          'Could not update submenu view.'
+        );
+        await safeApiCall(
+          tg.answerCallbackQuery.bind(tg),
+          [cq.id],
+          chatId
+        );
         return res.sendStatus(200);
       }
 
-      await UserStateManager.setState(user_id, chat_id, "menu", { last_callback: data }, message_id);
-      await tg.answerCallbackQuery(cq.id, { text: `Pressed: ${data}` });
+      if (data === 'to_mainmenu') {
+        await UserStateManager.setState(userId, chatId, 'menu', {}, messageId);
+        await safeApiCall(
+          tg.editMessageText.bind(tg),
+          [chatId, messageId, 'Main menu:\n\nChoose:', {
+            reply_markup: { inline_keyboard: [[{ text: 'Go to Submenu', callback_data: 'to_submenu' }]] }
+          }],
+          chatId,
+          'Could not update main menu.'
+        );
+        await safeApiCall(
+          tg.answerCallbackQuery.bind(tg),
+          [cq.id],
+          chatId
+        );
+        return res.sendStatus(200);
+      }
+
+      // generic callback
+      await UserStateManager.setState(userId, chatId, 'menu', { last_callback: data }, messageId);
+      await safeApiCall(
+        tg.answerCallbackQuery.bind(tg),
+        [cq.id, { text: `Pressed: ${data}` }],
+        chatId
+      );
       return res.sendStatus(200);
     }
 
-    // Handle messages
+    // ─── Handle incoming messages ───────────────────────────────
     if (update.message && update.message.text) {
       const msg = update.message;
       const chatId = Number(msg.chat.id);
@@ -96,86 +122,160 @@ app.post(`/bot${BOT_TOKEN}`, async (req, res) => {
       const username = msg.from.username || '';
       const text = msg.text.trim();
 
+      // Save message
       await saveMessage(chatId, fromId, username, text);
 
-      if (isAdmin(fromId)) {
-        if (/^\/menu$/.test(text)) {
-          const reply = await tg.sendMessage(chatId, "Main menu:\n\nChoose:", {
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: "Go to Submenu", callback_data: "to_submenu" }]
-              ]
-            }
-          });
-          await UserStateManager.setState(fromId, chatId, "menu", {}, reply.message_id ? Number(reply.message_id) : null);
+      // Admin-only commands
+      if (ADMIN_ID_INT && fromId === ADMIN_ID_INT) {
+        // /test
+        if (/^\/test\b/i.test(text)) {
+          const up = Math.floor((Date.now() - startedAt.getTime()) / 1000);
+          await safeApiCall(
+            tg.sendMessage.bind(tg),
+            [chatId, `✅ Bot is working!\nUptime: ${up} seconds.`],
+            chatId,
+            'Failed to send status.'
+          );
           return res.sendStatus(200);
         }
+
+        // /last N
+        if (/^\/last(\s+\d+)?$/i.test(text)) {
+          const n = parseInt((text.match(/^\/last\s+(\d+)$/i) || [])[1] || '5', 10);
+          const msgs = await getLastMessages(n);
+          const payload = msgs.length
+            ? `Last ${msgs.length} messages:\n\n` +
+              msgs.map(m =>
+                `[${m.created_at.toISOString().replace('T', ' ').slice(0, 19)}] ${m.username || m.user_id}: ${m.text}`
+              ).join('\n\n')
+            : 'No recent messages.';
+          await safeApiCall(
+            tg.sendMessage.bind(tg),
+            [chatId, payload],
+            chatId,
+            'Failed to retrieve history.'
+          );
+          return res.sendStatus(200);
+        }
+
+        // /menu
+        if (/^\/menu$/.test(text)) {
+          const reply = await safeApiCall(
+            tg.sendMessage.bind(tg),
+            [chatId, 'Main menu:\n\nChoose:', {
+              reply_markup: {
+                inline_keyboard: [[{ text: 'Go to Submenu', callback_data: 'to_submenu' }]]
+              }
+            }],
+            chatId,
+            'Failed to open menu.'
+          );
+          const mid = reply?.message_id ? Number(reply.message_id) : null;
+          await UserStateManager.setState(fromId, chatId, 'menu', {}, mid);
+          return res.sendStatus(200);
+        }
+
+        // /reset
         if (/^\/reset$/.test(text)) {
           await UserStateManager.deleteState(fromId, chatId);
-          await tg.sendMessage(chatId, "State reset. Send /menu to start again.");
+          await safeApiCall(
+            tg.sendMessage.bind(tg),
+            [chatId, 'State reset. Send /menu to start again.'],
+            chatId,
+            'Failed to confirm reset.'
+          );
           return res.sendStatus(200);
         }
+
+        // /editlast
         if (/^\/editlast$/.test(text)) {
           const state = await UserStateManager.getState(fromId, chatId);
-          if (state && state.last_message_id) {
+          if (state?.last_message_id) {
             try {
-              await tg.editMessageText(chatId, Number(state.last_message_id), "✏️ This message was edited via /editlast!");
-              await tg.sendMessage(chatId, "Last menu message edited!");
-            } catch (e) {
-              await UserStateManager.deleteState(fromId, chatId); // Clean up possibly bad state
-              if (String(e).includes('message to edit not found')) {
-                await tg.sendMessage(chatId, "❗ Message to edit was already deleted or too old.");
-              } else if (String(e).includes('message is not modified')) {
-                await tg.sendMessage(chatId, "❗ Message is already up-to-date. Try changing content.");
-              } else {
-                await tg.sendMessage(chatId, "❗ Failed to edit message. (API error)");
-              }
+              await safeApiCall(
+                tg.editMessageText.bind(tg),
+                [chatId, Number(state.last_message_id), '✏️ This message was edited via /editlast!'],
+                chatId
+              );
+              await safeApiCall(
+                tg.sendMessage.bind(tg),
+                [chatId, 'Last menu message edited!'],
+                chatId,
+                'Could not confirm edit.'
+              );
+            } catch {
+              await UserStateManager.deleteState(fromId, chatId);
             }
           } else {
-            await tg.sendMessage(chatId, "No recent menu message to edit.");
+            await safeApiCall(
+              tg.sendMessage.bind(tg),
+              [chatId, 'No recent menu message to edit.'],
+              chatId,
+              null
+            );
           }
           return res.sendStatus(200);
         }
 
+        // /deletelast
         if (/^\/deletelast$/.test(text)) {
           const state = await UserStateManager.getState(fromId, chatId);
-          if (state && state.last_message_id) {
+          if (state?.last_message_id) {
             try {
-              await tg.deleteMessage(chatId, Number(state.last_message_id));
-              await UserStateManager.deleteState(fromId, chatId); // Clean up after delete
-              await tg.sendMessage(chatId, "Last menu message deleted!");
-            } catch (e) {
+              await safeApiCall(
+                tg.deleteMessage.bind(tg),
+                [chatId, Number(state.last_message_id)],
+                chatId
+              );
               await UserStateManager.deleteState(fromId, chatId);
-              if (String(e).includes('message to delete not found')) {
-                await tg.sendMessage(chatId, "❗ Message to delete was already deleted or too old.");
-              } else {
-                await tg.sendMessage(chatId, "❗ Failed to delete message. (API error)");
-              }
+              await safeApiCall(
+                tg.sendMessage.bind(tg),
+                [chatId, 'Last menu message deleted!'],
+                chatId,
+                'Could not confirm deletion.'
+              );
+            } catch {
+              await UserStateManager.deleteState(fromId, chatId);
             }
           } else {
-            await tg.sendMessage(chatId, "No recent menu message to delete.");
+            await safeApiCall(
+              tg.sendMessage.bind(tg),
+              [chatId, 'No recent menu message to delete.'],
+              chatId,
+              null
+            );
           }
           return res.sendStatus(200);
         }
       }
-      // Simple echo for everyone
-      await tg.sendMessage(chatId, `👋 Hello! You said: "${text}"`);
+
+      // Simple echo for everyone else
+      await safeApiCall(
+        tg.sendMessage.bind(tg),
+        [chatId, `👋 Hello! You said: "${text}"`],
+        chatId,
+        null
+      );
+      return res.sendStatus(200);
     }
+
     res.sendStatus(200);
   } catch (err) {
-    console.error("Webhook error:", err);
+    console.error('Webhook error:', err);
     res.sendStatus(500);
   }
 });
 
+// 404 handler
 app.use((req, res) => res.sendStatus(404));
 
+// Start Express
 app.listen(PORT, async () => {
   console.log(`Express listening on port ${PORT}`);
-  // Notify admin
   if (ADMIN_ID_INT) {
-    try {
-      await tg.sendMessage(ADMIN_ID_INT, `🚀 Bot started at ${new Date().toISOString()}`);
-    } catch (e) {}
+    await safeApiCall(
+      tg.sendMessage.bind(tg),
+      [ADMIN_ID_INT, `🚀 Bot started at ${new Date().toISOString()}`]
+    );
   }
 });
