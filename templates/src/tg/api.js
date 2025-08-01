@@ -1,34 +1,107 @@
 import fetch from 'node-fetch';
+import fs from 'fs';
 
 export class TelegramAPI {
-  constructor(botToken) {
+  /**
+   * @param {string} botToken — your bot’s token
+   * @param {{ logger?: Console }} [options]
+   */
+  constructor(botToken, { logger = console } = {}) {
     if (!botToken) throw new Error('Bot token is required');
     this.API_URL = `https://api.telegram.org/bot${botToken}`;
+    this.logger = logger;
   }
 
-  // Generic GET or POST API call
+  /**
+   * Generic GET/POST wrapper with retries, rate-limit handling, and logging.
+   * @private
+   * @param {string} method
+   * @param {object} data
+   * @param {boolean} isPost
+   */
   async _call(method, data = {}, isPost = true) {
     const url = `${this.API_URL}/${method}`;
+    const maxNetworkRetries = 3;
+    let networkAttempts = 0;
+
+    // Build fetch options
     const options = isPost
       ? {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(data),
         }
-      : {
-          method: 'GET',
-        };
+      : { method: 'GET' };
+    const requestUrl = isPost
+      ? url
+      : `${url}?${new URLSearchParams(data)}`;
 
-    try {
-      const res = await fetch(
-        isPost ? url : `${url}?${new URLSearchParams(data)}`,
-        options
-      );
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.description || 'Telegram API Error');
-      return json.result;
-    } catch (err) {
-      throw err;
+    while (true) {
+      try {
+        this.logger.info(`→ [${method}] Request`, { url: requestUrl, payload: data });
+        const res = await fetch(requestUrl, options);
+        const text = await res.text().catch(() => null);
+        let json;
+        try {
+          json = text ? JSON.parse(text) : {};
+        } catch (e) {
+          throw new Error(`Invalid JSON response (${res.status}): ${text}`);
+        }
+
+        // HTTP-level errors
+        if (!res.ok) {
+          // Rate limited?
+          if (res.status === 429) {
+            // Bot API may return JSON.parameters.retry_after (sec) or a Retry-After header
+            const retryAfter =
+              json.parameters?.retry_after ||
+              parseInt(res.headers.get('retry-after'), 10) ||
+              1;
+            this.logger.warn(`← [${method}] Rate limited. Retrying in ${retryAfter}s`, {
+              status: res.status,
+              error: json,
+            });
+            await new Promise(r => setTimeout(r, retryAfter * 1_000));
+            continue;
+          }
+          // Other HTTP errors
+          const msg = `HTTP ${res.status} ${res.statusText}`;
+          this.logger.error(`← [${method}] HTTP error`, { status: res.status, body: json || text });
+          throw new Error(msg);
+        }
+
+        // Bot API-level errors: always include ok, error_code, description (§ Making requests) :contentReference[oaicite:0]{index=0}
+        if (json.ok === false) {
+          const code = json.error_code;
+          const desc = json.description;
+          // Flood wait error (parameters.retry_after) :contentReference[oaicite:1]{index=1}
+          if (json.parameters?.retry_after) {
+            const wait = json.parameters.retry_after;
+            this.logger.warn(`← [${method}] Flood wait ${wait}s`, { error_code: code, description: desc });
+            await new Promise(r => setTimeout(r, wait * 1_000));
+            continue;
+          }
+          this.logger.error(`← [${method}] Telegram API error ${code}`, { description: desc, data });
+          throw new Error(`Telegram API Error ${code}: ${desc}`);
+        }
+
+        this.logger.info(`← [${method}] Success`, { result: json.result });
+        return json.result;
+      } catch (err) {
+        // Network or parsing failures
+        const isNetworkError =
+          err.type === 'system' ||
+          /ECONNRESET|ENOTFOUND|ETIMEDOUT/.test(err.message);
+        if (isNetworkError && networkAttempts < maxNetworkRetries) {
+          const backoff = 2 ** networkAttempts * 1_000;
+          networkAttempts++;
+          this.logger.warn(`*** Network error on [${method}]: ${err.message}. Retrying #${networkAttempts} in ${backoff}ms`);
+          await new Promise(r => setTimeout(r, backoff));
+          continue;
+        }
+        this.logger.error(`*** Failed [${method}]`, err);
+        throw err;
+      }
     }
   }
 
@@ -138,13 +211,21 @@ export class TelegramAPI {
   // ===== Utilities =====
   async downloadFile(file_path, dest) {
     const url = `https://api.telegram.org/file/bot${this.API_URL.split('bot')[1]}/${file_path}`;
+    this.logger.info(`→ [downloadFile] Streaming ${file_path} → ${dest}`);
     const res = await fetch(url);
-    const fileStream = require('fs').createWriteStream(dest);
-    await new Promise((resolve, reject) => {
+    if (!res.ok) {
+      const msg = `Failed to download file: HTTP ${res.status}`;
+      this.logger.error(msg);
+      throw new Error(msg);
+    }
+    return new Promise((resolve, reject) => {
+      const fileStream = fs.createWriteStream(dest);
       res.body.pipe(fileStream);
       res.body.on('error', reject);
-      fileStream.on('finish', resolve);
+      fileStream.on('finish', () => {
+        this.logger.info(`← [downloadFile] Saved to ${dest}`);
+        resolve(dest);
+      });
     });
-    return dest;
   }
 }
