@@ -184,7 +184,7 @@ msg "Registering webhook with Telegram (final step)…"
 WEBHOOK_RESULT=$(npm run sethook 2>&1 || true)
 echo "$WEBHOOK_RESULT"
 if echo "$WEBHOOK_RESULT" | grep -q '"ok":true'; then
-    msg "✅ Webhook successfully set!"
+    msg "✅ Advanced webhook set successfully!"
 else
     warn "⚠️  Webhook registration failed. See above. Run again after DNS and HTTPS are fully ready:"
     echo "    npm run sethook"
