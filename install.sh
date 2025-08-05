@@ -179,6 +179,48 @@ if [[ $PM2_START != "n" ]]; then
     pm2 startup systemd -u "$(logname)" --hp "/home/$(logname)" >/dev/null
 fi
 
+# ----------- REDIS SETUP (Interactive, like sethook) ----------- #
+msg "Configuring Redis (secure & durable)…"
+
+# Install Redis if not present
+if ! command -v redis-server >/dev/null 2>&1; then
+    msg "Installing redis-server …"
+    apt-get install -y -qq redis-server
+    systemctl enable --now redis-server
+else
+    # Make sure it's running
+    systemctl is-active --quiet redis-server || systemctl start redis-server
+    systemctl enable redis-server >/dev/null 2>&1 || true
+fi
+
+# If REDIS_URL already works, just doctor+test and skip wizard
+set +e
+npm run redis:test >/dev/null 2>&1
+HAS_WORKING_REDIS=$?
+set -e
+
+if [[ $HAS_WORKING_REDIS -ne 0 ]]; then
+    msg "Launching Redis setup wizard (you can set password/ACL, enable AOF, update .env)…"
+    REDIS_WIZARD_OUT=$(npm run redis:wizard 2>&1 || true)
+    echo "$REDIS_WIZARD_OUT"
+
+    # Re-test after wizard
+    set +e
+    npm run redis:test >/dev/null 2>&1
+    REDIS_OK=$?
+    set -e
+
+    if [[ $REDIS_OK -eq 0 ]]; then
+        msg "✅ Redis configured and reachable."
+    else
+        warn "⚠️  Redis setup incomplete. You can re-run the wizard later:"
+        echo "    npm run redis:wizard"
+    fi
+else
+    msg "✅ Existing REDIS_URL is valid. Running doctor for details…"
+    npm run redis:doctor || true
+fi
+
 # ----------- RUN sethook ONLY after all is ready ----------- #
 msg "Registering webhook with Telegram (final step)…"
 WEBHOOK_RESULT=$(npm run sethook 2>&1 || true)
