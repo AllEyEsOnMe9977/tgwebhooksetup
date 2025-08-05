@@ -4,12 +4,18 @@
   "version": "1.0.0",
   "scripts": {
     "start": "node src/index.js",
-    "sethook": "node setWebhook.js advanced"
+    "sethook": "node setWebhook.js advanced",
+    "redis:wizard": "node setupRedis.js wizard",
+    "redis:doctor": "node setupRedis.js doctor",
+    "redis:test": "node setupRedis.js test"
   },
   "dependencies": {
+    "bullmq": "^5.56.9",
     "dotenv": "^16",
     "express": "^4",
+    "ioredis": "^5.7.0",
     "mariadb": "^3",
-    "node-fetch": "^3"
+    "node-fetch": "^3",
+    "uuid": "^11.1.0"
   }
 }
