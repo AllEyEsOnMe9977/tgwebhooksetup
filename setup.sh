@@ -351,7 +351,7 @@ msg "🗝️ Writing .env"
 umask 077
 cat > "$PROJECT_DIR/.env" <<EOF
 # --- Bot config ---
-TELEGRAM_TOKEN=$BOT_TOKEN
+TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 TELEGRAM_SECRET=$SECRET_TOKEN
 # Comma-separated list (e.g. 12345,-1001234567890)
 BOT_OWNER_CHAT_IDS=$OWNER_IDS
@@ -406,92 +406,119 @@ chmod 700 "$SCRIPTS_DIR" "$SCRIPTS_DIR/webhook-manage.sh"
 # ---------- intital_test.js (NOT executed) ----------
 msg "🧪 Writing intital_test.js (not executed)"
 cat > "$PROJECT_DIR/intital_test.js" <<'EOF'
+// bot.js
 import 'dotenv/config';
 import express from 'express';
 import { Telegraf } from 'telegraf';
 
 // --- ENV and sanity checks ---
-const BOT_TOKEN = process.env.TELEGRAM_TOKEN;
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN; // <— standardized
 const SECRET_TOKEN = process.env.TELEGRAM_SECRET;
-const PORT = process.env.PORT || '3000';
+const PORT = process.env.PORT;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH;
 const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 
 const OWNER_IDS_RAW = process.env.BOT_OWNER_CHAT_IDS;
-if (!BOT_TOKEN || !SECRET_TOKEN) throw new Error("Missing TELEGRAM_TOKEN or TELEGRAM_SECRET in .env");
+
+if (!BOT_TOKEN || !SECRET_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_SECRET in .env");
 if (!WEBHOOK_PATH || !WEBHOOK_DOMAIN) throw new Error("Missing WEBHOOK_PATH or WEBHOOK_DOMAIN in .env");
 if (!OWNER_IDS_RAW) throw new Error("Missing BOT_OWNER_CHAT_IDS in .env");
+
 const OWNER_CHAT_IDS = OWNER_IDS_RAW.split(',').map(s=>s.trim()).filter(Boolean);
 if (!OWNER_CHAT_IDS.length) throw new Error("BOT_OWNER_CHAT_IDS has no valid entries.");
 
-const bot = new Telegraf(BOT_TOKEN);
-const app = express();
-app.use(express.json());
+// ──────────────────────────────────────────────────────────────────────────────
+// Exported bot instance (shared across the app)
+// ──────────────────────────────────────────────────────────────────────────────
+export const bot = new Telegraf(BOT_TOKEN);
 
-// 401 if missing/incorrect secret header
-app.post(WEBHOOK_PATH, (req, res, next) => {
-  const header = req.get('x-telegram-bot-api-secret-token');
-  if (header !== SECRET_TOKEN) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  return next();
-});
-
-// Hand off to Telegraf
-app.post(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
-
-// Simple health
-app.get('/health', (_, res) => res.send('OK'));
-
-// Owner success message middleware
+// Owner success message middleware (kept here; handlers added by app.js will stack after this)
 bot.use(async (ctx, next) => {
   try {
-    // Check if this is a message (ignore callback queries, etc.)
     if (ctx.message && OWNER_CHAT_IDS.includes(String(ctx.from.id))) {
-      // Send a success confirmation to the owner
       await ctx.reply('✅ Success! Hello, owner 👑');
-      // WHY: Owners should get confirmation for visibility & quick feedback
     }
-    await next(); // continue to other middlewares/handlers
+    await next();
   } catch (err) {
-    // Gracefully handle errors
     console.error("Owner success middleware error:", err);
   }
 });
 
-/**
- * Notifies all owners on startup.
- * WHY: Let owners know the bot started successfully for peace of mind!
- */
 async function notifyOwnersOnStartup() {
   for (const chatId of OWNER_CHAT_IDS) {
     try {
-      await bot.telegram.sendMessage(chatId,
-        '🤖 Bot started successfully! All systems go! 🚀');
+      await bot.telegram.sendMessage(chatId, '🤖 Bot started successfully! All systems go! 🚀');
     } catch (err) {
-      // Log but don't crash if one fails
       console.error(`Failed to notify owner ${chatId}:`, err.message);
     }
   }
 }
 
-// --- Listen and setup webhook ---
-app.listen(PORT, '127.0.0.1', async () => {
-  console.log(`Listening on http://127.0.0.1:${PORT}`);
-  console.log(`Webhook: ${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`);
+// ──────────────────────────────────────────────────────────────────────────────
+// Exported start function: spins up Express + webhook
+// ──────────────────────────────────────────────────────────────────────────────
+export async function startWebhookServer() {
+  const app = express();
+  app.use(express.json());
 
-  // Notify owners at startup!
-  await notifyOwnersOnStartup();
-
-  // Set webhook as before
-  const resp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      url: `${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`,
-      secret_token: SECRET_TOKEN,
-    }),
+  // 401 if missing/incorrect secret header
+  app.post(WEBHOOK_PATH, (req, res, next) => {
+    const header = req.get('x-telegram-bot-api-secret-token');
+    if (header !== SECRET_TOKEN) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    return next();
   });
-  console.log('setWebhook response:', await resp.json());
-});
+
+  // Hand off to Telegraf
+  app.post(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
+
+  // Simple health
+  app.get('/health', (_, res) => res.send('OK'));
+
+  app.listen(PORT, '127.0.0.1', async () => {
+    console.log(`Listening on http://127.0.0.1:${PORT}`);
+    console.log(`Webhook: ${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`);
+
+    await notifyOwnersOnStartup();
+
+    const resp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        url: `${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`,
+        secret_token: SECRET_TOKEN,
+        max_connections: '100', // Use more concurrent connections for high traffic
+        allowed_updates: JSON.stringify([
+          "message",
+          "edited_message",
+          "channel_post",
+          "edited_channel_post",
+          "inline_query",
+          "chosen_inline_result",
+          "callback_query",
+          "shipping_query",
+          "pre_checkout_query",
+          "poll",
+          "poll_answer",
+          "my_chat_member",
+          "chat_member",
+          "chat_join_request"
+        ]),
+        drop_pending_updates: 'true', // Start fresh, ignore old updates
+        // ip_address and certificate require special handling (see below)
+      }),
+    });
+    console.log('setWebhook response:', await resp.json());
+  });
+
+  // Graceful shutdown is optional here. If you want, you can add:
+  process.once("SIGINT", () => { bot.stop("SIGINT"); });
+  process.once("SIGTERM", () => { bot.stop("SIGTERM"); });
+}
+
+// Optional: allow running this file directly (node bot.js) to start server
+if (import.meta.url === `file://${process.argv[1]}`) {
+  startWebhookServer();
+}
 EOF
 chmod 600 "$PROJECT_DIR/intital_test.js"
 
