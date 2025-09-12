@@ -2,12 +2,11 @@
 ###############################################################################
 # nginx-webhook-setup.sh — Nginx + Telegram Webhook Setup (no systemd)
 # - Debian/Ubuntu (apt-get)
-# - TLS with fallback to HTTP-only if certbot fails
-# - Optional Telegram IP allowlist (snippet)
+# - TLS with fallback to HTTP-only if certbot fails (first-time only)
+# - Per-domain server; per-webhook location snippets under /etc/nginx/locations-<domain>/
 # - Writes: .env, scripts/webhook-manage.sh, intital_test.js, package.json
 # - Optional: run npm install (express, telegraf, dotenv)
-# - Enforces: ONE server{} per (domain,port). Aborts if duplicates exist.
-# - NEW: Auto-pick a random FREE localhost port if you press Enter at prompt
+# - Auto-pick free port; auto-generate secret if blank; smart webhook path
 ###############################################################################
 set -euo pipefail
 IFS=$'\n\t'
@@ -22,40 +21,106 @@ have() { command -v "$1" >/dev/null 2>&1; }
 validate_domain() { [[ $1 =~ ^https://[a-z0-9.-]+$ ]]; }
 validate_token()  { [[ $1 =~ ^[0-9]{6,12}:[A-Za-z0-9_-]{35,}$ ]]; }
 
-# Choose a free high port on 127.0.0.1. Prefers Python for atomic bind to port 0.
+# SIGPIPE-proof random suffix (6 [A-Za-z0-9])
+rand_suffix() {
+  if have python3; then
+    python3 - <<'PY'
+import secrets, string
+alphabet = string.ascii_letters + string.digits
+print(''.join(secrets.choice(alphabet) for _ in range(6)))
+PY
+  else
+    local _old
+    _old="$(set +o | grep -E '^set \+o pipefail$' || true)"
+    set +o pipefail
+    LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 6
+    eval "${_old:-:}"
+  fi
+}
+
+gen_uuid() {
+  if have uuidgen; then uuidgen
+  elif [[ -r /proc/sys/kernel/random/uuid ]]; then cat /proc/sys/kernel/random/uuid
+  else openssl rand -hex 16
+  fi
+}
+
 pick_free_port() {
   if have python3; then
-    local p
-    p="$(python3 - <<'PY'
+    python3 - <<'PY'
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.bind(("127.0.0.1", 0))
-port = s.getsockname()[1]
+print(s.getsockname()[1])
 s.close()
-print(port)
 PY
-)"
-    # sanity: avoid 80/443 just in case
-    if [[ "$p" -eq 80 || "$p" -eq 443 ]]; then
-      echo 0; return
-    fi
-    echo "$p"; return
+    return
   fi
-  # fallback: random within 20000-60999 and check with ss
-  local try
   for _ in $(seq 1 100); do
-    try=$(shuf -i 20000-60999 -n1)
-    if ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${try}$"; then
-      echo "$try"; return
+    p=$(shuf -i 20000-60999 -n1)
+    if ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$"; then
+      echo "$p"; return
     fi
   done
   echo 0
 }
 
-# Verify port is free on localhost (best-effort)
 port_is_free() {
   local p="$1"
   ! ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "127\.0\.0\.1:${p}$|:${p}$"
+}
+
+# Ensure the main server config includes the common include-dir
+ensure_locations_include() {
+  local server_file="$1" domain="$2"
+  local include_dir="/etc/nginx/locations-$domain"
+  mkdir -p "$include_dir"
+
+  if grep -qF "include $include_dir/*.conf;" "$server_file"; then
+    return 0
+  fi
+
+  if grep -q "^# --- WEBHOOK LOCATIONS ---" "$server_file"; then
+    awk -v inc="    include $include_dir/*.conf;" '
+      {print}
+      $0 ~ /^# --- WEBHOOK LOCATIONS ---/ && !done {print inc; done=1}
+    ' "$server_file" > "$server_file.tmp" && mv "$server_file.tmp" "$server_file"
+  elif grep -qE "location[[:space:]]*/[[:space:]]*\\{[[:space:]]*return[[:space:]]+404;" "$server_file"; then
+    sed -e "0,/location[[:space:]]*\/[[:space:]]*{[[:space:]]*return[[:space:]]\+404;[[:space:]]*}/s//    include ${include_dir//\//\\/}\\/*.conf;\n&/" \
+      "$server_file" > "$server_file.tmp" && mv "$server_file.tmp" "$server_file"
+  else
+    # Append near end of TLS server block (best-effort)
+    awk -v inc="    include $include_dir/*.conf;" '
+      /server\s*\{/ { depth++ }
+      /\}/ { if (depth>0) depth-- }
+      /server_name[[:space:]]+.*;/{ inserv=1 }
+      inserv && depth==1 && /^\}/ && !done { print inc; done=1 }
+      { print }
+    ' "$server_file" > "$server_file.tmp" && mv "$server_file.tmp" "$server_file"
+  fi
+}
+
+# Write one per-webhook snippet under /etc/nginx/locations-<domain>/<project>.conf
+write_webhook_snippet() {
+  local domain="$1" project="$2" path="$3" port="$4" secret="$5" snippet="$6"
+  local include_dir="/etc/nginx/locations-$domain"
+  mkdir -p "$include_dir"
+  cat > "$include_dir/${project}.conf" <<EOF
+# auto-generated snippet for $project
+location = $path {
+    include $snippet;
+
+    proxy_pass http://127.0.0.1:$port;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_read_timeout 90s;
+    gzip off;
+    proxy_set_header X-Telegram-Bot-Api-Secret-Token $secret;
+}
+EOF
 }
 
 # ---------- preflight ----------
@@ -78,27 +143,24 @@ read -rp "Backend port (Enter to auto-pick a free one): " PORT
 if [[ -z "${PORT:-}" ]]; then
   PORT="$(pick_free_port)"
   [[ "$PORT" -gt 1024 ]] || die "Failed to auto-pick a free port."
-  if ! port_is_free "$PORT"; then
-    die "Selected port $PORT is not free. Re-run the script."
-  fi
+  port_is_free "$PORT" || die "Selected port $PORT is not free."
   msg "🔢 Auto-picked free port: $PORT"
 else
-  [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -gt 0 && "$PORT" -le 65535 ]] || die "Invalid port number."
-  if ! port_is_free "$PORT"; then
-    die "Port $PORT is already in use. Re-run and pick another (or press Enter to auto-pick)."
-  fi
+  [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -gt 0 && "$PORT" -le 65535 ]] || die "Invalid port."
+  port_is_free "$PORT" || die "Port $PORT is already in use."
 fi
 
 default_project="telegram-bot"
 read -rp "Project name [$default_project]: " PROJECT_NAME
 PROJECT_NAME=${PROJECT_NAME:-$default_project}
 
-read -rp "Custom webhook path (default /bot<TOKEN>): " CUSTOM_PATH
-if [[ -n "${CUSTOM_PATH:-}" ]]; then
+read -rp "Custom webhook path (default: project + random): " CUSTOM_PATH
+if [[ -z "${CUSTOM_PATH:-}" ]]; then
+  WEBHOOK_PATH="/${PROJECT_NAME}_$(rand_suffix)"
+  msg "🛣️  Using webhook path: $WEBHOOK_PATH"
+else
   [[ "$CUSTOM_PATH" =~ ^/ ]] || CUSTOM_PATH="/$CUSTOM_PATH"
   WEBHOOK_PATH="$CUSTOM_PATH"
-else
-  WEBHOOK_PATH="/bot$BOT_TOKEN"
 fi
 
 read -rp "Place project under /opt/$PROJECT_NAME? (y/N): " USE_OPT
@@ -111,11 +173,21 @@ else
   mkdir -p "$PROJECT_DIR"
 fi
 
-read -rp "Secret token for webhook verification (optional): " SECRET_TOKEN
+read -rp "Secret token for webhook verification (leave blank to auto-generate): " SECRET_TOKEN
 SECRET_TOKEN=${SECRET_TOKEN:-}
+if [[ -z "$SECRET_TOKEN" ]]; then
+  SECRET_TOKEN="$(gen_uuid)"
+  msg "🔐 Generated secret token: $SECRET_TOKEN"
+fi
 
 read -rp "Restrict to Telegram IP ranges? (y/N): " USE_TG_IPS
 USE_TG_IPS=${USE_TG_IPS,,}
+
+# Owner chat IDs required (comma-separated, allow negatives)
+read -rp "Owner chat IDs (comma-separated, required): " OWNER_IDS
+OWNER_IDS="$(echo "${OWNER_IDS:-}" | tr -d '[:space:]')"
+[[ -n "$OWNER_IDS" ]] || die "Owner chat IDs are required."
+[[ "$OWNER_IDS" =~ ^-?[0-9]+(,-?[0-9]+)*$ ]] || die "Owner chat IDs must be comma-separated integers."
 
 default_email="admin@$DOMAIN_CLEAN"
 read -rp "Email for Let's Encrypt [$default_email]: " CERTBOT_EMAIL
@@ -131,32 +203,50 @@ apt-get install -y -qq nginx certbot python3-certbot-nginx curl openssl ca-certi
 
 systemctl enable --now nginx
 
-# ---------- enforce single server{} per domain ----------
 ENABLED_DIR="/etc/nginx/sites-enabled"
-EXISTING=()
-while IFS= read -r -d '' f; do
-  if grep -qE "^\s*server_name\s+$DOMAIN_CLEAN\s*;" "$f"; then
-    EXISTING+=("$f")
-  fi
-done < <(find "$ENABLED_DIR" -maxdepth 1 -type l -print0 2>/dev/null)
-
-if (( ${#EXISTING[@]} > 0 )); then
-  echo
-  warn "Found existing enabled server{} for $DOMAIN_CLEAN:"
-  printf ' - %s\n' "${EXISTING[@]}"
-  die "Consolidate to ONE server{} for $DOMAIN_CLEAN. Merge your webhook locations and disable duplicates."
-fi
-
-# ---------- choose per-domain config filename ----------
 SITE_CONF="/etc/nginx/sites-available/${DOMAIN_CLEAN}.conf"
 ENABLED_LINK="/etc/nginx/sites-enabled/${DOMAIN_CLEAN}.conf"
 SNIPPET="/etc/nginx/snippets/${PROJECT_NAME}-telegram_allowlist.conf"
 
-# ---------- bootstrap nginx (HTTP) ----------
-msg "⚙️ Configuring nginx (bootstrap HTTP)"
-rm -f "$SITE_CONF" "$ENABLED_LINK"
+# ---------- allowlist snippet per-project ----------
+if [[ "$USE_TG_IPS" == "y" ]]; then
+  cat > "$SNIPPET" <<'EOF'
+# Telegram published IP ranges (update when they change)
+allow 149.154.160.0/20;
+allow 91.108.4.0/22;
+allow 91.108.56.0/22;
+allow 149.154.164.0/22;
+allow 149.154.168.0/22;
+allow 149.154.172.0/22;
+deny all;
+EOF
+else
+  echo "# no IP restrictions" > "$SNIPPET"
+fi
+chmod 640 "$SNIPPET" || true
 
-cat > "$SITE_CONF" <<EOF
+# ---------- detect existing server for domain (symlink or file) ----------
+EXISTING_LINK=""
+while IFS= read -r -d '' f; do
+  if grep -qE "^\s*server_name\s+$DOMAIN_CLEAN\s*;" "$f"; then
+    EXISTING_LINK="$f"; break
+  fi
+done < <(find "$ENABLED_DIR" -maxdepth 1 \( -type l -o -type f \) -print0 2>/dev/null)
+
+if [[ -n "$EXISTING_LINK" ]]; then
+  # Edit existing config (follow symlink)
+  EXISTING_FILE="$(realpath "$EXISTING_LINK")"
+  msg "🔧 Found existing server for $DOMAIN_CLEAN -> using $EXISTING_FILE"
+  ensure_locations_include "$EXISTING_FILE" "$DOMAIN_CLEAN"
+  write_webhook_snippet "$DOMAIN_CLEAN" "$PROJECT_NAME" "$WEBHOOK_PATH" "$PORT" "$SECRET_TOKEN" "$SNIPPET"
+  nginx -t && systemctl reload nginx
+  msg "✅ Updated existing config and reloaded nginx."
+else
+  # First-time setup for this domain
+  msg "⚙️ Configuring nginx (bootstrap HTTP)"
+  rm -f "$SITE_CONF" "$ENABLED_LINK"
+
+  cat > "$SITE_CONF" <<EOF
 # === AUTO-GENERATED: ${DOMAIN_CLEAN} (bootstrap) ===
 server {
     listen 80;
@@ -172,44 +262,23 @@ server {
 }
 EOF
 
-ln -sf "$SITE_CONF" "$ENABLED_LINK"
-nginx -t && systemctl reload nginx
+  ln -sf "$SITE_CONF" "$ENABLED_LINK"
+  nginx -t && systemctl reload nginx
 
-# ---------- certbot ----------
-msg "🔐 Getting SSL cert..."
-CERT_OK=0
-if certbot --nginx -d "$DOMAIN_CLEAN" --non-interactive --agree-tos \
-  --email "$CERTBOT_EMAIL" --redirect --hsts; then
-  CERT_OK=1
-else
-  warn "Certbot failed; proceeding HTTP-only."
-fi
+  msg "🔐 Getting SSL cert..."
+  CERT_OK=0
+  if certbot --nginx -d "$DOMAIN_CLEAN" --non-interactive --agree-tos \
+    --email "$CERTBOT_EMAIL" --redirect --hsts; then
+    CERT_OK=1
+  else
+    warn "Certbot failed; proceeding HTTP-only."
+  fi
 
-# ---------- allowlist snippet ----------
-if [[ "$USE_TG_IPS" == "y" ]]; then
-  cat > "$SNIPPET" <<'EOF'
-# Telegram published IP ranges (update when they change)
-allow 149.154.160.0/20;
-allow 91.108.4.0/22;
-allow 91.108.56.0/22;
-allow 149.154.164.0/22;
-allow 149.154.168.0/22;
-allow 149.154.172.0/22;
-deny all;
-EOF
-else
-  echo "# no IP restrictions" > "$SNIPPET"
-fi
+  msg "📝 Writing final nginx config"
+  SECRET_BLOCK=""; [[ -n "$SECRET_TOKEN" ]] && SECRET_BLOCK=$'        proxy_set_header X-Telegram-Bot-Api-Secret-Token '"$SECRET_TOKEN;"$'\n'
 
-# ---------- final nginx config (single per-domain server) ----------
-msg "📝 Writing final nginx config"
-SECRET_BLOCK=""
-if [[ -n "$SECRET_TOKEN" ]]; then
-  SECRET_BLOCK=$'        proxy_set_header X-Telegram-Bot-Api-Secret-Token '"$SECRET_TOKEN;"$'\n'
-fi
-
-if [[ $CERT_OK -eq 1 ]]; then
-  cat > "$SITE_CONF" <<EOF
+  if [[ $CERT_OK -eq 1 ]]; then
+    cat > "$SITE_CONF" <<EOF
 # === AUTO-GENERATED: ${DOMAIN_CLEAN} (TLS) ===
 server {
     listen 80;
@@ -234,18 +303,7 @@ server {
     proxy_buffering off;
 
     # --- WEBHOOK LOCATIONS ---
-    location = $WEBHOOK_PATH {
-        include $SNIPPET;
-
-        proxy_pass http://127.0.0.1:$PORT;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 90s;
-        gzip off;
-${SECRET_BLOCK}    }
+    include /etc/nginx/locations-$DOMAIN_CLEAN/*.conf;
 
     location = /health {
         add_header Cache-Control "no-store";
@@ -255,8 +313,8 @@ ${SECRET_BLOCK}    }
     location / { return 404; }
 }
 EOF
-else
-  cat > "$SITE_CONF" <<EOF
+  else
+    cat > "$SITE_CONF" <<EOF
 # === AUTO-GENERATED: ${DOMAIN_CLEAN} (HTTP-only) ===
 server {
     listen 80;
@@ -269,18 +327,7 @@ server {
     proxy_buffering off;
 
     # --- WEBHOOK LOCATIONS ---
-    location = $WEBHOOK_PATH {
-        include $SNIPPET;
-
-        proxy_pass http://127.0.0.1:$PORT;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 90s;
-        gzip off;
-${SECRET_BLOCK}    }
+    include /etc/nginx/locations-$DOMAIN_CLEAN/*.conf;
 
     location = /health {
         add_header Cache-Control "no-store";
@@ -290,12 +337,14 @@ ${SECRET_BLOCK}    }
     location / { return 404; }
 }
 EOF
-fi
+  fi
 
-nginx -t && systemctl reload nginx
-chmod 640 "$SITE_CONF" || true
-[[ -f "$SNIPPET" ]] && chmod 640 "$SNIPPET" || true
-msg "✅ nginx configured at $SITE_CONF (single server for $DOMAIN_CLEAN)"
+  # Write our first webhook snippet now
+  write_webhook_snippet "$DOMAIN_CLEAN" "$PROJECT_NAME" "$WEBHOOK_PATH" "$PORT" "$SECRET_TOKEN" "$SNIPPET"
+  nginx -t && systemctl reload nginx
+  chmod 640 "$SITE_CONF" || true
+  msg "✅ nginx configured at $SITE_CONF"
+fi
 
 # ---------- .env ----------
 msg "🗝️ Writing .env"
@@ -304,7 +353,8 @@ cat > "$PROJECT_DIR/.env" <<EOF
 # --- Bot config ---
 TELEGRAM_TOKEN=$BOT_TOKEN
 TELEGRAM_SECRET=$SECRET_TOKEN
-BOT_OWNER_CHAT_ID=   # <- fill with your user or group/chat id
+# Comma-separated list (e.g. 12345,-1001234567890)
+BOT_OWNER_CHAT_IDS=$OWNER_IDS
 
 # --- Webhook / server ---
 WEBHOOK_DOMAIN=$WEBHOOK_DOMAIN
@@ -353,30 +403,29 @@ esac
 EOFSCRIPT
 chmod 700 "$SCRIPTS_DIR" "$SCRIPTS_DIR/webhook-manage.sh"
 
-# ---------- intital_test.js (DO NOT RUN AUTOMATICALLY) ----------
+# ---------- intital_test.js (NOT executed) ----------
 msg "🧪 Writing intital_test.js (not executed)"
 cat > "$PROJECT_DIR/intital_test.js" <<'EOF'
 import 'dotenv/config';
 import express from 'express';
 import { Telegraf } from 'telegraf';
 
+// --- ENV and sanity checks ---
 const BOT_TOKEN = process.env.TELEGRAM_TOKEN;
 const SECRET_TOKEN = process.env.TELEGRAM_SECRET;
 const PORT = process.env.PORT || '3000';
-const OWNER_CHAT_ID = process.env.BOT_OWNER_CHAT_ID;
 const WEBHOOK_PATH = process.env.WEBHOOK_PATH;
 const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 
-if (!BOT_TOKEN || !SECRET_TOKEN || !OWNER_CHAT_ID) {
-  throw new Error("Missing TELEGRAM_TOKEN, TELEGRAM_SECRET, or BOT_OWNER_CHAT_ID in .env");
-}
-if (!WEBHOOK_PATH || !WEBHOOK_DOMAIN) {
-  throw new Error("Missing WEBHOOK_PATH or WEBHOOK_DOMAIN in .env");
-}
+const OWNER_IDS_RAW = process.env.BOT_OWNER_CHAT_IDS;
+if (!BOT_TOKEN || !SECRET_TOKEN) throw new Error("Missing TELEGRAM_TOKEN or TELEGRAM_SECRET in .env");
+if (!WEBHOOK_PATH || !WEBHOOK_DOMAIN) throw new Error("Missing WEBHOOK_PATH or WEBHOOK_DOMAIN in .env");
+if (!OWNER_IDS_RAW) throw new Error("Missing BOT_OWNER_CHAT_IDS in .env");
+const OWNER_CHAT_IDS = OWNER_IDS_RAW.split(',').map(s=>s.trim()).filter(Boolean);
+if (!OWNER_CHAT_IDS.length) throw new Error("BOT_OWNER_CHAT_IDS has no valid entries.");
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
-
 app.use(express.json());
 
 // 401 if missing/incorrect secret header
@@ -392,13 +441,47 @@ app.post(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
 // Simple health
 app.get('/health', (_, res) => res.send('OK'));
 
-// NOTE: This file is NOT executed by the setup script.
-// Run it manually after filling .env: `node intital_test.js`
+// Owner success message middleware
+bot.use(async (ctx, next) => {
+  try {
+    // Check if this is a message (ignore callback queries, etc.)
+    if (ctx.message && OWNER_CHAT_IDS.includes(String(ctx.from.id))) {
+      // Send a success confirmation to the owner
+      await ctx.reply('✅ Success! Hello, owner 👑');
+      // WHY: Owners should get confirmation for visibility & quick feedback
+    }
+    await next(); // continue to other middlewares/handlers
+  } catch (err) {
+    // Gracefully handle errors
+    console.error("Owner success middleware error:", err);
+  }
+});
+
+/**
+ * Notifies all owners on startup.
+ * WHY: Let owners know the bot started successfully for peace of mind!
+ */
+async function notifyOwnersOnStartup() {
+  for (const chatId of OWNER_CHAT_IDS) {
+    try {
+      await bot.telegram.sendMessage(chatId,
+        '🤖 Bot started successfully! All systems go! 🚀');
+    } catch (err) {
+      // Log but don't crash if one fails
+      console.error(`Failed to notify owner ${chatId}:`, err.message);
+    }
+  }
+}
+
+// --- Listen and setup webhook ---
 app.listen(PORT, '127.0.0.1', async () => {
   console.log(`Listening on http://127.0.0.1:${PORT}`);
-  console.log(`Webhook path: ${WEBHOOK_PATH}`);
+  console.log(`Webhook: ${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`);
 
-  // Set Telegram webhook to your configured domain
+  // Notify owners at startup!
+  await notifyOwnersOnStartup();
+
+  // Set webhook as before
   const resp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -408,20 +491,6 @@ app.listen(PORT, '127.0.0.1', async () => {
     }),
   });
   console.log('setWebhook response:', await resp.json());
-
-  // Notify owner the bot is ready
-  try {
-    const readyResp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: OWNER_CHAT_ID, text: "🤖 Bot is ready and webhook set!" }),
-    });
-    const readyData = await readyResp.json();
-    if (!readyData.ok) throw new Error(readyData.description);
-    console.log("✅ Bot is ready message sent!");
-  } catch (err) {
-    console.error("❌ Failed to send ready notification:", err.message);
-  }
 });
 EOF
 chmod 600 "$PROJECT_DIR/intital_test.js"
@@ -458,17 +527,14 @@ if [[ "$DO_NPM" == "y" ]]; then
     msg "📥 Installing npm dependencies (express, telegraf, dotenv)"
     (cd "$PROJECT_DIR" && npm install)
   else
-    warn "npm not found. Skipping npm install. Install Node.js and run: cd \"$PROJECT_DIR\" && npm install"
+    warn "npm not found. Skipping npm install. Run later: cd \"$PROJECT_DIR\" && npm install"
   fi
 else
   msg "⏭️ Skipping npm install (run later: cd \"$PROJECT_DIR\" && npm install)"
 fi
 
-# ---------- final notes ----------
+# ---------- final ----------
 msg "🎉 Setup complete!"
-echo "Webhook URL: ${WEBHOOK_DOMAIN}${WEBHOOK_PATH}"
-echo "Project directory: $PROJECT_DIR"
-echo "Helper: $SCRIPTS_DIR/webhook-manage.sh"
-echo "intital_test.js and package.json written (not executed)."
-echo
-echo "👉 IMPORTANT: Keep a SINGLE nginx server{} for $DOMAIN_CLEAN. Add more webhooks as more 'location =' blocks in $SITE_CONF."
+echo "Project: $PROJECT_DIR"
+echo "Webhook: ${WEBHOOK_DOMAIN}${WEBHOOK_PATH}"
+echo "Helper:  $SCRIPTS_DIR/webhook-manage.sh"
