@@ -4,7 +4,7 @@
 # - Debian/Ubuntu (apt-get)
 # - TLS via certbot; uses HTTPS-only for Telegram (required by Telegram)
 # - Per-domain server; per-webhook location snippets under /etc/nginx/locations-<domain>/
-# - Writes: .env, scripts/webhook-manage.sh, intital_test.js, package.json
+# - Writes: .env, scripts/webhook-manage.sh, bot.js, package.json
 # - Optional: run npm install (express, telegraf, dotenv)
 # - Auto-pick free port; auto-generate secret if blank; smart webhook path
 ###############################################################################
@@ -374,9 +374,9 @@ esac
 EOFSCRIPT
 chmod 700 "$SCRIPTS_DIR" "$SCRIPTS_DIR/webhook-manage.sh"
 
-# ---------- intital_test.js (NOT executed) ----------
-msg "Writing intital_test.js (not executed)"
-cat > "$PROJECT_DIR/intital_test.js" <<'EOF'
+# ---------- bot.js (NOT executed) ----------
+msg "Writing bot.js (not executed)"
+cat > "$PROJECT_DIR/bot.js" <<'EOF'
 // bot.js - minimal webhook starter
 import 'dotenv/config';
 import express from 'express';
@@ -494,7 +494,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   startWebhookServer();
 }
 EOF
-chmod 600 "$PROJECT_DIR/intital_test.js"
+chmod 600 "$PROJECT_DIR/bot.js"
 
 # ---------- package.json ----------
 msg "Writing package.json"
@@ -505,7 +505,7 @@ cat > "$PROJECT_DIR/package.json" <<'EOF'
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node intital_test.js"
+    "start": "node bot.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
