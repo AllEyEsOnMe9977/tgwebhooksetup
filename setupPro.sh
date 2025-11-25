@@ -421,7 +421,7 @@ bot.command('start', async (ctx) => {
   if (OWNER_CHAT_IDS.includes(String(ctx.from.id))) {
     await ctx.reply('Owner /start: bot is ready.');
   } else {
-    await ctx.reply('Hello! This bot is restricted.');
+    return;
   }
 });
 
