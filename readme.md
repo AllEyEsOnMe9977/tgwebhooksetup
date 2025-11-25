@@ -9,4 +9,4 @@ cd /opt
 rm -rf tgwebhooksetup   # (optional, if you want a fresh start)
 git clone https://github.com/AllEyEsOnMe9977/tgwebhooksetup.git
 cd tgwebhooksetup
-sudo bash setup.sh    # not ready_install.sh!
+sudo bash setupPro.sh    # not ready_install.sh!
