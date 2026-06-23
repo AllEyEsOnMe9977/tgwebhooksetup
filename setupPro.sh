@@ -505,11 +505,12 @@ cat > "$PROJECT_DIR/package.json" <<'EOF'
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "dev": "node --watch bot.js"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "dotenv": "^17.2.1",
+    "express": "^5.2.1",
     "telegraf": "^4.16.3"
   }
 }
