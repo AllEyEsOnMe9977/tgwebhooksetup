@@ -88,15 +88,27 @@ ensure_locations_include() {
   elif grep -qE "location[[:space:]]*/[[:space:]]*\\{[[:space:]]*return[[:space:]]+404;" "$server_file"; then
     sed -e "0,/location[[:space:]]*\/[[:space:]]*{[[:space:]]*return[[:space:]]\+404;[[:space:]]*}/s//    include ${include_dir//\//\\/}\\/*.conf;\n&/" \
       "$server_file" > "$server_file.tmp" && mv "$server_file.tmp" "$server_file"
-  else
-    # Append near end of TLS server block (best-effort)
-    awk -v inc="    include $include_dir/*.conf;" '
-      /server\s*\{/ { depth++ }
-      /\}/ { if (depth>0) depth-- }
-      /server_name[[:space:]]+.*;/{ inserv=1 }
-      inserv && depth==1 && /^\}/ && !done { print inc; done=1 }
-      { print }
-    ' "$server_file" > "$server_file.tmp" && mv "$server_file.tmp" "$server_file"
+else
+    # Depth-aware insert: find the 443 server block closing brace and prepend the include
+    local inc_line="    include ${include_dir}/*.conf;"
+    python3 -c "
+import sys
+path, inc_line = sys.argv[1], sys.argv[2]
+with open(path) as f: text = f.read()
+idx = text.rfind('listen 443')
+if idx == -1:
+    print(text, end=''); sys.exit()
+start = text.rfind('{', 0, idx)
+depth = 0
+for i in range(start, len(text)):
+    if text[i] == '{': depth += 1
+    elif text[i] == '}':
+        depth -= 1
+        if depth == 0:
+            print(text[:i] + '\n' + inc_line + '\n' + text[i:], end='')
+            sys.exit()
+print(text, end='')
+" "$server_file" "$inc_line" > "$server_file.tmp" && mv "$server_file.tmp" "$server_file"
   fi
 }
 
@@ -313,6 +325,19 @@ EOF
   # Write our first webhook snippet now
   write_webhook_snippet "$DOMAIN_CLEAN" "$PROJECT_NAME" "$WEBHOOK_PATH" "$PORT" "$SNIPPET"
   nginx -t && systemctl reload nginx
+
+  # Ensure nginx reloads automatically when certbot renews the certificate
+  RENEWAL_HOOK="/etc/letsencrypt/renewal-hooks/post/reload-nginx.sh"
+  if [[ ! -f "$RENEWAL_HOOK" ]]; then
+    cat > "$RENEWAL_HOOK" <<'HOOK'
+#!/usr/bin/env bash
+# Reload nginx after certbot renews the TLS certificate for this domain
+systemctl reload nginx
+HOOK
+    chmod 755 "$RENEWAL_HOOK"
+    msg "Wrote certbot renewal hook: $RENEWAL_HOOK"
+  fi
+
   chmod 640 "$SITE_CONF" || true
   msg "nginx configured at $SITE_CONF"
 fi
@@ -356,12 +381,13 @@ case "${1:-}" in
     curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/deleteWebhook" | python3 -m json.tool
     ;;
   set)
-    PARAMS="url=${WEBHOOK_DOMAIN}${WEBHOOK_PATH}"
-    if [[ -n "${TELEGRAM_SECRET:-}" ]]; then
-      PARAMS="${PARAMS}&secret_token=${TELEGRAM_SECRET}"
-    fi
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-      -H "Content-Type: application/x-www-form-urlencoded" -d "$PARAMS" | python3 -m json.tool
+      -H "Content-Type: application/x-www-form-urlencoded" \
+      -d "url=${WEBHOOK_DOMAIN}${WEBHOOK_PATH}" \
+      -d "secret_token=${TELEGRAM_SECRET}" \
+      -d "max_connections=100" \
+      -d 'allowed_updates=["message","edited_message","channel_post","edited_channel_post","callback_query"]' \
+      -d "drop_pending_updates=true" | python3 -m json.tool
     ;;
   test)
     curl -s -X POST "${WEBHOOK_DOMAIN}${WEBHOOK_PATH}" \
@@ -494,10 +520,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   startWebhookServer();
 }
 EOF
-chmod 600 "$PROJECT_DIR/bot.js"
+chmod 640 "$PROJECT_DIR/bot.js"
 
 # ---------- package.json ----------
 msg "Writing package.json"
+# Reset umask before writing non-secret files
+umask 022
 cat > "$PROJECT_DIR/package.json" <<'EOF'
 {
   "name": "telegram-webhook-bot",
