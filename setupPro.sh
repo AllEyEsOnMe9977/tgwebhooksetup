@@ -516,9 +516,10 @@ export async function startWebhookServer() {
 }
 
 // Allow running this file directly
-if (import.meta.url === `file://${process.argv[1]}`) {
-  startWebhookServer();
-}
+console.log("import.meta.url =", import.meta.url);
+console.log("process.argv[1] =", process.argv[1]);
+
+startWebhookServer();
 EOF
 chmod 640 "$PROJECT_DIR/bot.js"
 
