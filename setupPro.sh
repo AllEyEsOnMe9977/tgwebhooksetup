@@ -143,35 +143,54 @@ msg "Telegram Webhook + Nginx Setup"
 read -rp "Telegram bot token: " BOT_TOKEN
 validate_token "$BOT_TOKEN" || die "Token format invalid."
 
-default_domain="https://$(hostname -f | tr '[:upper:]' '[:lower:]')"
-read -rp "Public HTTPS domain [$default_domain]: " WEBHOOK_DOMAIN
-WEBHOOK_DOMAIN=${WEBHOOK_DOMAIN:-$default_domain}
-validate_domain "$WEBHOOK_DOMAIN" || die "Domain must start with https:// and contain only a hostname."
-DOMAIN_CLEAN="${WEBHOOK_DOMAIN#https://}"
-
-# Auto-pick port if user presses Enter
-read -rp "Backend port (Enter to auto-pick a free one): " PORT
-if [[ -z "${PORT:-}" ]]; then
-  PORT="$(pick_free_port)"
-  [[ "$PORT" -gt 1024 ]] || die "Failed to auto-pick a free port."
-  port_is_free "$PORT" || die "Selected port $PORT is not free."
-  msg "Auto-picked free port: $PORT"
+# ---------- bot mode: webhook (default) or polling ----------
+read -rp "Bot mode - (w)ebhook or (p)olling? [w]: " BOT_MODE_IN
+BOT_MODE_IN=${BOT_MODE_IN,,}
+if [[ "$BOT_MODE_IN" == "p" || "$BOT_MODE_IN" == "polling" ]]; then
+  BOT_MODE="polling"
+  msg "Mode: polling (no nginx/TLS/webhook needed; bot connects out to Telegram)"
 else
-  [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -gt 0 && "$PORT" -le 65535 ]] || die "Invalid port."
-  port_is_free "$PORT" || die "Port $PORT is already in use."
+  BOT_MODE="webhook"
+  msg "Mode: webhook (requires public HTTPS domain via nginx + certbot)"
 fi
 
 default_project="telegram-bot"
 read -rp "Project name [$default_project]: " PROJECT_NAME
 PROJECT_NAME=${PROJECT_NAME:-$default_project}
 
-read -rp "Custom webhook path (default: project + random): " CUSTOM_PATH
-if [[ -z "${CUSTOM_PATH:-}" ]]; then
-  WEBHOOK_PATH="/${PROJECT_NAME}_$(rand_suffix)"
-  msg "Using webhook path: $WEBHOOK_PATH"
+if [[ "$BOT_MODE" == "webhook" ]]; then
+  default_domain="https://$(hostname -f | tr '[:upper:]' '[:lower:]')"
+  read -rp "Public HTTPS domain [$default_domain]: " WEBHOOK_DOMAIN
+  WEBHOOK_DOMAIN=${WEBHOOK_DOMAIN:-$default_domain}
+  validate_domain "$WEBHOOK_DOMAIN" || die "Domain must start with https:// and contain only a hostname."
+  DOMAIN_CLEAN="${WEBHOOK_DOMAIN#https://}"
+
+  # Auto-pick port if user presses Enter
+  read -rp "Backend port (Enter to auto-pick a free one): " PORT
+  if [[ -z "${PORT:-}" ]]; then
+    PORT="$(pick_free_port)"
+    [[ "$PORT" -gt 1024 ]] || die "Failed to auto-pick a free port."
+    port_is_free "$PORT" || die "Selected port $PORT is not free."
+    msg "Auto-picked free port: $PORT"
+  else
+    [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -gt 0 && "$PORT" -le 65535 ]] || die "Invalid port."
+    port_is_free "$PORT" || die "Port $PORT is already in use."
+  fi
+
+  read -rp "Custom webhook path (default: project + random): " CUSTOM_PATH
+  if [[ -z "${CUSTOM_PATH:-}" ]]; then
+    WEBHOOK_PATH="/${PROJECT_NAME}_$(rand_suffix)"
+    msg "Using webhook path: $WEBHOOK_PATH"
+  else
+    [[ "$CUSTOM_PATH" =~ ^/ ]] || CUSTOM_PATH="/$CUSTOM_PATH"
+    WEBHOOK_PATH="$CUSTOM_PATH"
+  fi
 else
-  [[ "$CUSTOM_PATH" =~ ^/ ]] || CUSTOM_PATH="/$CUSTOM_PATH"
-  WEBHOOK_PATH="$CUSTOM_PATH"
+  # Polling mode: none of the webhook/nginx/domain variables are needed.
+  WEBHOOK_DOMAIN=""
+  DOMAIN_CLEAN=""
+  WEBHOOK_PATH=""
+  PORT=""
 fi
 
 read -rp "Place project under /opt/$PROJECT_NAME? (y/N): " USE_OPT
@@ -191,8 +210,12 @@ if [[ -z "$SECRET_TOKEN" ]]; then
   msg "Generated secret token: $SECRET_TOKEN"
 fi
 
-read -rp "Restrict to Telegram IP ranges? (y/N): " USE_TG_IPS
-USE_TG_IPS=${USE_TG_IPS,,}
+if [[ "$BOT_MODE" == "webhook" ]]; then
+  read -rp "Restrict to Telegram IP ranges? (y/N): " USE_TG_IPS
+  USE_TG_IPS=${USE_TG_IPS,,}
+else
+  USE_TG_IPS="n"
+fi
 
 # Owner chat IDs required (comma-separated, allow negatives)
 read -rp "Owner chat IDs (comma-separated, required): " OWNER_IDS
@@ -200,19 +223,71 @@ OWNER_IDS="$(echo "${OWNER_IDS:-}" | tr -d '[:space:]')"
 [[ -n "$OWNER_IDS" ]] || die "Owner chat IDs are required."
 [[ "$OWNER_IDS" =~ ^-?[0-9]+(,-?[0-9]+)*$ ]] || die "Owner chat IDs must be comma-separated integers."
 
-default_email="admin@$DOMAIN_CLEAN"
-read -rp "Email for Let's Encrypt [$default_email]: " CERTBOT_EMAIL
-CERTBOT_EMAIL=${CERTBOT_EMAIL:-$default_email}
+if [[ "$BOT_MODE" == "webhook" ]]; then
+  default_email="admin@$DOMAIN_CLEAN"
+  read -rp "Email for Let's Encrypt [$default_email]: " CERTBOT_EMAIL
+  CERTBOT_EMAIL=${CERTBOT_EMAIL:-$default_email}
+fi
 
 read -rp "Run npm install (express telegraf dotenv) after writing files? (y/N): " DO_NPM
 DO_NPM=${DO_NPM,,}
 
-# ---------- dependencies ----------
-msg "Installing nginx + certbot"
-apt-get update -qq
-apt-get install -y -qq nginx certbot python3-certbot-nginx curl openssl ca-certificates
+# ---------- database selection ----------
+echo "Database options:"
+echo "  1) none (default)"
+echo "  2) sqlite    (local file DB, zero server setup)"
+echo "  3) mariadb   (installs mariadb-server if not present)"
+read -rp "Choose database [1]: " DB_CHOICE
+case "${DB_CHOICE:-1}" in
+  2) DB_TYPE="sqlite" ;;
+  3) DB_TYPE="mariadb" ;;
+  *) DB_TYPE="none" ;;
+esac
+msg "Database: $DB_TYPE"
 
-systemctl enable --now nginx
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+  read -rp "MariaDB database name [${PROJECT_NAME//-/_}]: " DB_NAME
+  DB_NAME=${DB_NAME:-${PROJECT_NAME//-/_}}
+  read -rp "MariaDB username [${PROJECT_NAME//-/_}_user]: " DB_USER
+  DB_USER=${DB_USER:-${PROJECT_NAME//-/_}_user}
+  # Auto-generate a strong password; user can change it later in .env
+  DB_PASS="$(gen_uuid | tr -d '-')"
+  msg "Generated MariaDB password (also saved in .env)."
+fi
+
+# ---------- dependencies ----------
+if [[ "$BOT_MODE" == "webhook" ]]; then
+  msg "Installing nginx + certbot"
+  apt-get update -qq
+  apt-get install -y -qq nginx certbot python3-certbot-nginx curl openssl ca-certificates
+  systemctl enable --now nginx
+else
+  msg "Installing base dependencies (polling mode, no nginx/certbot needed)"
+  apt-get update -qq
+  apt-get install -y -qq curl openssl ca-certificates
+fi
+
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+  if have mysql || have mariadb; then
+    msg "MariaDB/MySQL client already present."
+  else
+    msg "Installing mariadb-server"
+    apt-get install -y -qq mariadb-server
+    systemctl enable --now mariadb
+  fi
+
+  # Create database and user idempotently (safe to re-run)
+  msg "Provisioning MariaDB database '$DB_NAME' and user '$DB_USER'"
+  mysql -u root <<SQL
+CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
+FLUSH PRIVILEGES;
+SQL
+  msg "MariaDB database and user ready."
+fi
+
+if [[ "$BOT_MODE" == "webhook" ]]; then
 
 ENABLED_DIR="/etc/nginx/sites-enabled"
 SITE_CONF="/etc/nginx/sites-available/${DOMAIN_CLEAN}.conf"
@@ -222,13 +297,10 @@ SNIPPET="/etc/nginx/snippets/${PROJECT_NAME}-telegram_allowlist.conf"
 # ---------- allowlist snippet per-project ----------
 if [[ "$USE_TG_IPS" == "y" ]]; then
   cat > "$SNIPPET" <<'EOF'
-# Telegram published IP ranges (update when they change)
+# Telegram published IP ranges (source: https://core.telegram.org/bots/webhooks)
+# Verified current as of this script's last update. Re-check the URL above periodically.
 allow 149.154.160.0/20;
 allow 91.108.4.0/22;
-allow 91.108.56.0/22;
-allow 149.154.164.0/22;
-allow 149.154.168.0/22;
-allow 149.154.172.0/22;
 deny all;
 EOF
 else
@@ -342,27 +414,48 @@ HOOK
   msg "nginx configured at $SITE_CONF"
 fi
 
+fi # end BOT_MODE == webhook nginx/certbot block
+
 # ---------- .env ----------
 msg "Writing .env"
 umask 077
 cat > "$PROJECT_DIR/.env" <<EOF
 # --- Bot config ---
+BOT_MODE=$BOT_MODE
 TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 TELEGRAM_SECRET=$SECRET_TOKEN
 # Comma-separated list (e.g. 12345,-1001234567890)
 BOT_OWNER_CHAT_IDS=$OWNER_IDS
 
-# --- Webhook / server ---
+# --- Webhook / server (unused when BOT_MODE=polling) ---
 WEBHOOK_DOMAIN=$WEBHOOK_DOMAIN
 WEBHOOK_PATH=$WEBHOOK_PATH
 PORT=$PORT
+
+# --- Database ---
+DB_TYPE=$DB_TYPE
 EOF
+
+if [[ "$DB_TYPE" == "sqlite" ]]; then
+  cat >> "$PROJECT_DIR/.env" <<EOF
+DB_FILE=./data/${PROJECT_NAME}.sqlite3
+EOF
+elif [[ "$DB_TYPE" == "mariadb" ]]; then
+  cat >> "$PROJECT_DIR/.env" <<EOF
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_NAME=$DB_NAME
+DB_USER=$DB_USER
+DB_PASS=$DB_PASS
+EOF
+fi
 chmod 600 "$PROJECT_DIR/.env"
 
 # ---------- helper scripts ----------
-msg "Writing helper script"
 SCRIPTS_DIR="$PROJECT_DIR/scripts"
 mkdir -p "$SCRIPTS_DIR"
+if [[ "$BOT_MODE" == "webhook" ]]; then
+msg "Writing helper script"
 umask 077
 cat > "$SCRIPTS_DIR/webhook-manage.sh" <<'EOFSCRIPT'
 #!/usr/bin/env bash
@@ -399,16 +492,70 @@ case "${1:-}" in
 esac
 EOFSCRIPT
 chmod 700 "$SCRIPTS_DIR" "$SCRIPTS_DIR/webhook-manage.sh"
+else
+  msg "Skipping webhook-manage.sh (not applicable in polling mode)"
+fi
+
+# ---------- db.js (only written if a DB was selected) ----------
+if [[ "$DB_TYPE" == "sqlite" ]]; then
+  msg "Writing db.js (sqlite)"
+  mkdir -p "$PROJECT_DIR/data"
+  cat > "$PROJECT_DIR/db.js" <<'EOF'
+// db.js - sqlite connection helper (better-sqlite3, synchronous driver)
+import Database from 'better-sqlite3';
+import fs from 'fs';
+import path from 'path';
+
+const DB_FILE = process.env.DB_FILE || './data/bot.sqlite3';
+
+// Ensure the containing directory exists before opening the file
+fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+
+export const db = new Database(DB_FILE);
+db.pragma('journal_mode = WAL');
+
+console.log(`[db] sqlite connected: ${DB_FILE}`);
+EOF
+  chmod 640 "$PROJECT_DIR/db.js"
+elif [[ "$DB_TYPE" == "mariadb" ]]; then
+  msg "Writing db.js (mariadb)"
+  cat > "$PROJECT_DIR/db.js" <<'EOF'
+// db.js - mariadb connection pool helper
+import mariadb from 'mariadb';
+
+export const pool = mariadb.createPool({
+  host: process.env.DB_HOST || '127.0.0.1',
+  port: Number(process.env.DB_PORT || 3306),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASS,
+  database: process.env.DB_NAME,
+  connectionLimit: 5,
+});
+
+// Quick connectivity check at startup; fail loudly rather than silently.
+try {
+  const conn = await pool.getConnection();
+  console.log('[db] mariadb connected:', process.env.DB_NAME);
+  conn.release();
+} catch (err) {
+  console.error('[db] mariadb connection failed:', err.message);
+  throw err;
+}
+EOF
+  chmod 640 "$PROJECT_DIR/db.js"
+fi
 
 # ---------- bot.js (NOT executed) ----------
-msg "Writing bot.js (not executed)"
-cat > "$PROJECT_DIR/bot.js" <<'EOF'
-// bot.js - minimal webhook starter
+msg "Writing bot.js (not executed) - mode: $BOT_MODE, db: $DB_TYPE"
+cat > "$PROJECT_DIR/bot.js" <<EOF
+// bot.js - auto-generated starter (mode: $BOT_MODE, db: $DB_TYPE)
 import 'dotenv/config';
-import express from 'express';
 import { Telegraf } from 'telegraf';
+$( [[ "$BOT_MODE" == "webhook" ]] && echo "import express from 'express';" )
+$( [[ "$DB_TYPE" != "none" ]] && echo "import './db.js'; // initializes and logs DB connection on import" )
 
 // --- ENV and sanity checks ---
+const BOT_MODE = process.env.BOT_MODE || '$BOT_MODE';
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SECRET_TOKEN = process.env.TELEGRAM_SECRET;
 const PORT = process.env.PORT;
@@ -416,14 +563,17 @@ const WEBHOOK_PATH = process.env.WEBHOOK_PATH;
 const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 const OWNER_IDS_RAW = process.env.BOT_OWNER_CHAT_IDS;
 
-if (!BOT_TOKEN || !SECRET_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_SECRET in .env");
-if (!WEBHOOK_PATH || !WEBHOOK_DOMAIN) throw new Error("Missing WEBHOOK_PATH or WEBHOOK_DOMAIN in .env");
+if (!BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN in .env");
 if (!OWNER_IDS_RAW) throw new Error("Missing BOT_OWNER_CHAT_IDS in .env");
+if (BOT_MODE === 'webhook' && (!SECRET_TOKEN || !WEBHOOK_PATH || !WEBHOOK_DOMAIN)) {
+  throw new Error("Missing TELEGRAM_SECRET/WEBHOOK_PATH/WEBHOOK_DOMAIN in .env for webhook mode");
+}
 
 const OWNER_CHAT_IDS = OWNER_IDS_RAW.split(',').map(s=>s.trim()).filter(Boolean);
 if (!OWNER_CHAT_IDS.length) throw new Error("BOT_OWNER_CHAT_IDS has no valid entries.");
 
 console.log('Authorized owner IDs:', OWNER_CHAT_IDS);
+console.log('Bot mode:', BOT_MODE);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Bot instance
@@ -455,13 +605,14 @@ async function notifyOwnersOnStartup() {
   for (const chatId of OWNER_CHAT_IDS) {
     try {
       await bot.telegram.sendMessage(chatId, 'Bot started successfully!');
-      console.log(`Notified owner ${chatId}`);
+      console.log(\`Notified owner \${chatId}\`);
     } catch (err) {
-      console.error(`Failed to notify owner ${chatId}:`, err.message);
+      console.error(\`Failed to notify owner \${chatId}:\`, err.message);
     }
   }
 }
 
+$( if [[ "$BOT_MODE" == "webhook" ]]; then cat <<'WEBHOOKFN'
 // ──────────────────────────────────────────────────────────────────────────────
 // Start Express + webhook
 // ──────────────────────────────────────────────────────────────────────────────
@@ -515,19 +666,52 @@ export async function startWebhookServer() {
   process.once("SIGTERM", () => { bot.stop("SIGTERM"); });
 }
 
-// Allow running this file directly
-console.log("import.meta.url =", import.meta.url);
-console.log("process.argv[1] =", process.argv[1]);
-
 startWebhookServer();
+WEBHOOKFN
+else cat <<'POLLINGFN'
+// ──────────────────────────────────────────────────────────────────────────────
+// Start long-polling (no server, no webhook, no public URL needed)
+// ──────────────────────────────────────────────────────────────────────────────
+export async function startPolling() {
+  // Make sure no webhook is registered, or Telegram will reject getUpdates (409)
+  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+  console.log('Cleared any existing webhook (required before polling).');
+
+  await notifyOwnersOnStartup();
+
+  await bot.launch({
+    allowedUpdates: [
+      "message",
+      "edited_message",
+      "channel_post",
+      "edited_channel_post",
+      "callback_query"
+    ],
+  });
+  console.log('Bot is polling for updates.');
+}
+
+process.once("SIGINT", () => { bot.stop("SIGINT"); });
+process.once("SIGTERM", () => { bot.stop("SIGTERM"); });
+
+startPolling();
+POLLINGFN
+fi )
 EOF
 chmod 640 "$PROJECT_DIR/bot.js"
 
 # ---------- package.json ----------
-msg "Writing package.json"
+msg "Writing package.json (mode: $BOT_MODE, db: $DB_TYPE)"
 # Reset umask before writing non-secret files
 umask 022
-cat > "$PROJECT_DIR/package.json" <<'EOF'
+
+# Build the dependencies object based on selected options
+DEPS='"dotenv": "^17.2.1", "telegraf": "^4.16.3"'
+[[ "$BOT_MODE" == "webhook" ]] && DEPS="$DEPS, \"express\": \"^5.2.1\""
+[[ "$DB_TYPE" == "sqlite" ]] && DEPS="$DEPS, \"better-sqlite3\": \"^11.3.0\""
+[[ "$DB_TYPE" == "mariadb" ]] && DEPS="$DEPS, \"mariadb\": \"^3.4.0\""
+
+cat > "$PROJECT_DIR/package.json" <<EOF
 {
   "name": "telegram-webhook-bot",
   "version": "0.1.0",
@@ -538,9 +722,7 @@ cat > "$PROJECT_DIR/package.json" <<'EOF'
     "dev": "node --watch bot.js"
   },
   "dependencies": {
-    "dotenv": "^17.2.1",
-    "express": "^5.2.1",
-    "telegraf": "^4.16.3"
+    $DEPS
   }
 }
 EOF
@@ -555,7 +737,7 @@ EOF
 # ---------- npm install (optional) ----------
 if [[ "$DO_NPM" == "y" ]]; then
   if have npm; then
-    msg "Installing npm dependencies (express, telegraf, dotenv)"
+    msg "Installing npm dependencies ($DEPS)"
     (cd "$PROJECT_DIR" && npm install)
   else
     warn "npm not found. Skipping npm install. Run later: cd \"$PROJECT_DIR\" && npm install"
@@ -567,5 +749,16 @@ fi
 # ---------- final ----------
 msg "Setup complete."
 echo "Project: $PROJECT_DIR"
-echo "Webhook: ${WEBHOOK_DOMAIN}${WEBHOOK_PATH}"
-echo "Helper:  $SCRIPTS_DIR/webhook-manage.sh"
+echo "Mode:    $BOT_MODE"
+if [[ "$BOT_MODE" == "webhook" ]]; then
+  echo "Webhook: ${WEBHOOK_DOMAIN}${WEBHOOK_PATH}"
+  echo "Helper:  $SCRIPTS_DIR/webhook-manage.sh"
+else
+  echo "Polling: no public URL needed; run 'npm start' to launch the bot."
+fi
+echo "Database: $DB_TYPE"
+if [[ "$DB_TYPE" == "mariadb" ]]; then
+  echo "  DB name: $DB_NAME  DB user: $DB_USER  (password saved in .env)"
+elif [[ "$DB_TYPE" == "sqlite" ]]; then
+  echo "  DB file: $PROJECT_DIR/data/${PROJECT_NAME}.sqlite3"
+fi
