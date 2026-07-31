@@ -4,7 +4,7 @@
 # - Debian/Ubuntu (apt-get)
 # - TLS via certbot; uses HTTPS-only for Telegram (required by Telegram)
 # - Per-domain server; per-webhook location snippets under /etc/nginx/locations-<domain>/
-# - Writes: .env, scripts/webhook-manage.sh, bot.js, package.json
+# - Writes: .env, scripts/webhook-manage.sh, bot.ts, package.json
 # - Optional: run npm install (express, telegraf, dotenv)
 # - Auto-pick free port; auto-generate secret if blank; smart webhook path
 ###############################################################################
@@ -505,12 +505,12 @@ else
   msg "Skipping webhook-manage.sh (not applicable in polling mode)"
 fi
 
-# ---------- db.js (only written if a DB was selected) ----------
+# ---------- db.ts (only written if a DB was selected) ----------
 if [[ "$DB_TYPE" == "sqlite" ]]; then
-  msg "Writing db.js (sqlite)"
+  msg "Writing db.ts (sqlite)"
   mkdir -p "$PROJECT_DIR/data"
-  cat > "$PROJECT_DIR/db.js" <<'EOF'
-// db.js - sqlite connection helper (better-sqlite3, synchronous driver)
+  cat > "$PROJECT_DIR/db.ts" <<'EOF'
+// db.ts - sqlite connection helper (better-sqlite3, synchronous driver)
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
@@ -525,11 +525,11 @@ db.pragma('journal_mode = WAL');
 
 console.log(`[db] sqlite connected: ${DB_FILE}`);
 EOF
-  chmod 640 "$PROJECT_DIR/db.js"
+  chmod 640 "$PROJECT_DIR/db.ts"
 elif [[ "$DB_TYPE" == "mariadb" ]]; then
-  msg "Writing db.js (mariadb)"
-  cat > "$PROJECT_DIR/db.js" <<'EOF'
-// db.js - mariadb connection pool helper
+  msg "Writing db.ts (mariadb)"
+  cat > "$PROJECT_DIR/db.ts" <<'EOF'
+// db.ts - mariadb connection pool helper
 import mariadb from 'mariadb';
 
 export const pool = mariadb.createPool({
@@ -551,17 +551,17 @@ try {
   throw err;
 }
 EOF
-  chmod 640 "$PROJECT_DIR/db.js"
+  chmod 640 "$PROJECT_DIR/db.ts"
 fi
 
-# ---------- bot.js (NOT executed) ----------
-msg "Writing bot.js (not executed) - mode: $BOT_MODE, db: $DB_TYPE"
-cat > "$PROJECT_DIR/bot.js" <<EOF
-// bot.js - auto-generated starter (mode: $BOT_MODE, db: $DB_TYPE)
+# ---------- bot.ts (NOT executed) ----------
+msg "Writing bot.ts (not executed) - mode: $BOT_MODE, db: $DB_TYPE"
+cat > "$PROJECT_DIR/bot.ts" <<EOF
+// bot.ts - auto-generated starter (mode: $BOT_MODE, db: $DB_TYPE)
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 $( [[ "$BOT_MODE" == "webhook" ]] && echo "import express from 'express';" )
-$( [[ "$DB_TYPE" != "none" ]] && echo "import './db.js'; // initializes and logs DB connection on import" )
+$( [[ "$DB_TYPE" != "none" ]] && echo "import './db.ts'; // initializes and logs DB connection on import" )
 
 // --- ENV and sanity checks ---
 const BOT_MODE = process.env.BOT_MODE || '$BOT_MODE';
@@ -590,7 +590,7 @@ console.log('Bot mode:', BOT_MODE);
 export const bot = new Telegraf(BOT_TOKEN);
 
 // Simple debug middleware
-bot.use(async (ctx, next) => {
+bot.use(async (ctx: any, next: () => Promise<void>) => {
   console.log('Incoming update:', {
     updateId: ctx.update.update_id,
     from: ctx.from?.id,
@@ -602,7 +602,7 @@ bot.use(async (ctx, next) => {
 });
 
 // Example owner-only /start
-bot.command('start', async (ctx) => {
+bot.command('start', async (ctx: any) => {
   if (OWNER_CHAT_IDS.includes(String(ctx.from.id))) {
     await ctx.reply('Owner /start: bot is ready.');
   } else {
@@ -743,7 +743,7 @@ startPolling();
 POLLINGFN
 fi )
 EOF
-chmod 640 "$PROJECT_DIR/bot.js"
+chmod 640 "$PROJECT_DIR/bot.ts"
 
 # ---------- package.json ----------
 msg "Writing package.json (mode: $BOT_MODE, db: $DB_TYPE)"
@@ -756,6 +756,9 @@ DEPS='"dotenv": "^17.2.1", "telegraf": "^4.16.3"'
 [[ "$DB_TYPE" == "sqlite" ]] && DEPS="$DEPS, \"better-sqlite3\": \"^11.3.0\""
 [[ "$DB_TYPE" == "mariadb" ]] && DEPS="$DEPS, \"mariadb\": \"^3.4.0\""
 
+DEV_DEPS='"typescript": "^5.7.3", "tsx": "^4.19.2", "@types/node": "^22.10.5"'
+[[ "$BOT_MODE" == "webhook" ]] && DEV_DEPS="$DEV_DEPS, \"@types/express\": \"^5.0.0\""
+
 cat > "$PROJECT_DIR/package.json" <<EOF
 {
   "name": "telegram-webhook-bot",
@@ -763,11 +766,14 @@ cat > "$PROJECT_DIR/package.json" <<EOF
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node bot.js",
-    "dev": "node --watch bot.js"
+    "start": "tsx bot.ts",
+    "dev": "tsx watch bot.ts"
   },
   "dependencies": {
     $DEPS
+  },
+  "devDependencies": {
+    $DEV_DEPS
   }
 }
 EOF
@@ -780,6 +786,26 @@ npm-debug.log*
 logs/
 EOF
 
+
+# ---------- tsconfig.json ----------
+msg "Writing tsconfig.json"
+cat > "$PROJECT_DIR/tsconfig.json" <<'EOF'
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "outDir": "dist"
+  },
+  "include": ["*.ts"]
+}
+EOF
+
 # ---------- ecosystem.config.cjs (pm2 process definition) ----------
 msg "Writing ecosystem.config.cjs (pm2 config)"
 mkdir -p "$PROJECT_DIR/logs"
@@ -790,9 +816,10 @@ module.exports = {
   apps: [
     {
       name: "$PROJECT_NAME",
-      script: "bot.js",
+      script: "bot.ts",
       cwd: "$PROJECT_DIR",
       interpreter: "node",
+      interpreter_args: "--import tsx",
       // Restart policy: keep it alive, but don't hot-loop-crash forever
       autorestart: true,
       max_restarts: 10,
