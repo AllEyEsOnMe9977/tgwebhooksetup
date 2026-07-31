@@ -267,6 +267,15 @@ else
   apt-get install -y -qq curl openssl ca-certificates
 fi
 
+# ---------- pm2 (process manager, keeps bot running/restarting) ----------
+if have pm2; then
+  msg "pm2 already installed: $(pm2 -v)"
+else
+  have npm || { apt-get install -y -qq nodejs npm; }
+  msg "Installing pm2 globally"
+  npm install -g pm2 || die "Failed to install pm2. Install manually: npm install -g pm2"
+fi
+
 if [[ "$DB_TYPE" == "mariadb" ]]; then
   if have mysql || have mariadb; then
     msg "MariaDB/MySQL client already present."
@@ -479,7 +488,7 @@ case "${1:-}" in
       -d "url=${WEBHOOK_DOMAIN}${WEBHOOK_PATH}" \
       -d "secret_token=${TELEGRAM_SECRET}" \
       -d "max_connections=100" \
-      -d 'allowed_updates=["message","edited_message","channel_post","edited_channel_post","callback_query"]' \
+      -d 'allowed_updates=["message","edited_message","channel_post","edited_channel_post","business_connection","business_message","edited_business_message","deleted_business_messages","message_reaction","message_reaction_count","inline_query","chosen_inline_result","callback_query","shipping_query","pre_checkout_query","purchased_paid_media","poll","poll_answer","my_chat_member","chat_member","chat_join_request","chat_boost","removed_chat_boost"]' \
       -d "drop_pending_updates=true" | python3 -m json.tool
     ;;
   test)
@@ -654,7 +663,25 @@ export async function startWebhookServer() {
           "edited_message",
           "channel_post",
           "edited_channel_post",
-          "callback_query"
+          "business_connection",
+          "business_message",
+          "edited_business_message",
+          "deleted_business_messages",
+          "message_reaction",
+          "message_reaction_count",
+          "inline_query",
+          "chosen_inline_result",
+          "callback_query",
+          "shipping_query",
+          "pre_checkout_query",
+          "purchased_paid_media",
+          "poll",
+          "poll_answer",
+          "my_chat_member",
+          "chat_member",
+          "chat_join_request",
+          "chat_boost",
+          "removed_chat_boost"
         ]),
         drop_pending_updates: 'true',
       }),
@@ -685,7 +712,25 @@ export async function startPolling() {
       "edited_message",
       "channel_post",
       "edited_channel_post",
-      "callback_query"
+      "business_connection",
+      "business_message",
+      "edited_business_message",
+      "deleted_business_messages",
+      "message_reaction",
+      "message_reaction_count",
+      "inline_query",
+      "chosen_inline_result",
+      "callback_query",
+      "shipping_query",
+      "pre_checkout_query",
+      "purchased_paid_media",
+      "poll",
+      "poll_answer",
+      "my_chat_member",
+      "chat_member",
+      "chat_join_request",
+      "chat_boost",
+      "removed_chat_boost"
     ],
   });
   console.log('Bot is polling for updates.');
@@ -732,7 +777,42 @@ cat > "$PROJECT_DIR/.gitignore" <<'EOF'
 node_modules/
 .env
 npm-debug.log*
+logs/
 EOF
+
+# ---------- ecosystem.config.cjs (pm2 process definition) ----------
+msg "Writing ecosystem.config.cjs (pm2 config)"
+mkdir -p "$PROJECT_DIR/logs"
+cat > "$PROJECT_DIR/ecosystem.config.cjs" <<EOF
+// ecosystem.config.cjs - pm2 process definition, auto-generated
+// Docs: https://pm2.keymetrics.io/docs/usage/application-declaration/
+module.exports = {
+  apps: [
+    {
+      name: "$PROJECT_NAME",
+      script: "bot.js",
+      cwd: "$PROJECT_DIR",
+      interpreter: "node",
+      // Restart policy: keep it alive, but don't hot-loop-crash forever
+      autorestart: true,
+      max_restarts: 10,
+      min_uptime: "10s",
+      restart_delay: 3000,
+      watch: false,
+      env: {
+        NODE_ENV: "production",
+      },
+      // Logging
+      out_file: "$PROJECT_DIR/logs/out.log",
+      error_file: "$PROJECT_DIR/logs/error.log",
+      merge_logs: true,
+      log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+      time: true,
+    },
+  ],
+};
+EOF
+chmod 640 "$PROJECT_DIR/ecosystem.config.cjs"
 
 # ---------- npm install (optional) ----------
 if [[ "$DO_NPM" == "y" ]]; then
@@ -744,6 +824,25 @@ if [[ "$DO_NPM" == "y" ]]; then
   fi
 else
   msg "Skipping npm install (run later: cd \"$PROJECT_DIR\" && npm install)"
+fi
+
+# ---------- pm2 start (start bot under pm2 and persist across reboots) ----------
+if have pm2; then
+  msg "Starting bot under pm2"
+  (cd "$PROJECT_DIR" && pm2 start ecosystem.config.cjs)
+  pm2 save
+  # Configure pm2 to resurrect the saved process list on system boot.
+  # 'pm2 startup' prints a command that must be run as root; since this
+  # script already runs as root, we generate and execute it directly.
+  STARTUP_CMD="$(pm2 startup systemd -u root --hp /root 2>/dev/null | tail -n1)"
+  if [[ "$STARTUP_CMD" == sudo* || "$STARTUP_CMD" == env* ]]; then
+    eval "$STARTUP_CMD" || warn "pm2 startup command failed; run manually: pm2 startup"
+  else
+    warn "Could not auto-detect pm2 startup command. Run manually: pm2 startup"
+  fi
+  msg "pm2 process list saved; bot will auto-start on boot."
+else
+  warn "pm2 not found; bot NOT started. Run manually: cd \"$PROJECT_DIR\" && pm2 start ecosystem.config.cjs && pm2 save"
 fi
 
 # ---------- final ----------
@@ -762,3 +861,4 @@ if [[ "$DB_TYPE" == "mariadb" ]]; then
 elif [[ "$DB_TYPE" == "sqlite" ]]; then
   echo "  DB file: $PROJECT_DIR/data/${PROJECT_NAME}.sqlite3"
 fi
+echo "Process manager: pm2 (pm2 status | pm2 logs $PROJECT_NAME | pm2 restart $PROJECT_NAME)"
