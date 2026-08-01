@@ -562,7 +562,7 @@ cat > "$PROJECT_DIR/bot.ts" <<EOF
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 $( [[ "$BOT_MODE" == "webhook" ]] && echo "import express from 'express';" )
-$( [[ "$DB_TYPE" != "none" ]] && echo "import './db.ts'; // initializes and logs DB connection on import" )
+$( [[ "$DB_TYPE" != "none" ]] && echo "import './db.js'; // initializes and logs DB connection on import" )
 
 // --- ENV and sanity checks ---
 const BOT_MODE = process.env.BOT_MODE || '$BOT_MODE';
