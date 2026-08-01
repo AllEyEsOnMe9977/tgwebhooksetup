@@ -547,7 +547,8 @@ try {
   console.log('[db] mariadb connected:', process.env.DB_NAME);
   conn.release();
 } catch (err) {
-  console.error('[db] mariadb connection failed:', err.message);
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error('[db] mariadb connection failed:', msg);
   throw err;
 }
 EOF
@@ -590,7 +591,7 @@ console.log('Bot mode:', BOT_MODE);
 export const bot = new Telegraf(BOT_TOKEN);
 
 // Simple debug middleware
-bot.use(async (ctx: any, next: () => Promise<void>) => {
+bot.use(async (ctx, next) => {
   console.log('Incoming update:', {
     updateId: ctx.update.update_id,
     from: ctx.from?.id,
@@ -602,7 +603,7 @@ bot.use(async (ctx: any, next: () => Promise<void>) => {
 });
 
 // Example owner-only /start
-bot.command('start', async (ctx: any) => {
+bot.command('start', async (ctx) => {
   if (OWNER_CHAT_IDS.includes(String(ctx.from.id))) {
     await ctx.reply('Owner /start: bot is ready.');
   } else {
@@ -616,7 +617,8 @@ async function notifyOwnersOnStartup() {
       await bot.telegram.sendMessage(chatId, 'Bot started successfully!');
       console.log(\`Notified owner \${chatId}\`);
     } catch (err) {
-      console.error(\`Failed to notify owner \${chatId}:\`, err.message);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(\`Failed to notify owner \${chatId}:\`, msg);
     }
   }
 }
