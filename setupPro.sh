@@ -702,39 +702,8 @@ else cat <<'POLLINGFN'
 // Start long-polling (no server, no webhook, no public URL needed)
 // ──────────────────────────────────────────────────────────────────────────────
 export async function startPolling() {
-  // Make sure no webhook is registered, or Telegram will reject getUpdates (409)
-  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-  console.log('Cleared any existing webhook (required before polling).');
-
   await notifyOwnersOnStartup();
-
-  await bot.launch({
-    allowedUpdates: [
-      "message",
-      "edited_message",
-      "channel_post",
-      "edited_channel_post",
-      "business_connection",
-      "business_message",
-      "edited_business_message",
-      "deleted_business_messages",
-      "message_reaction",
-      "message_reaction_count",
-      "inline_query",
-      "chosen_inline_result",
-      "callback_query",
-      "shipping_query",
-      "pre_checkout_query",
-      "purchased_paid_media",
-      "poll",
-      "poll_answer",
-      "my_chat_member",
-      "chat_member",
-      "chat_join_request",
-      "chat_boost",
-      "removed_chat_boost"
-    ],
-  });
+  await bot.launch();
   console.log('Bot is polling for updates.');
 }
 
