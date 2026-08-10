@@ -664,7 +664,7 @@ export async function startWebhookServer() {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         url: `${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`,
-        secret_token: SECRET_TOKEN_SAFE,
+        secret_token: SECRET_TOKEN,
         max_connections: '100',
         allowed_updates: JSON.stringify([
           "message",
