@@ -568,16 +568,21 @@ $( [[ "$DB_TYPE" != "none" ]] && echo "import './db.js'; // initializes and logs
 const BOT_MODE = process.env.BOT_MODE || '$BOT_MODE';
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SECRET_TOKEN = process.env.TELEGRAM_SECRET;
-const PORT = process.env.PORT;
-const WEBHOOK_PATH = process.env.WEBHOOK_PATH;
-const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
+const PORT_RAW = process.env.PORT;
+const WEBHOOK_PATH_RAW = process.env.WEBHOOK_PATH;
+const WEBHOOK_DOMAIN_RAW = process.env.WEBHOOK_DOMAIN;
 const OWNER_IDS_RAW = process.env.BOT_OWNER_CHAT_IDS;
 
 if (!BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN in .env");
 if (!OWNER_IDS_RAW) throw new Error("Missing BOT_OWNER_CHAT_IDS in .env");
-if (BOT_MODE === 'webhook' && (!SECRET_TOKEN || !WEBHOOK_PATH || !WEBHOOK_DOMAIN)) {
-  throw new Error("Missing TELEGRAM_SECRET/WEBHOOK_PATH/WEBHOOK_DOMAIN in .env for webhook mode");
+if (BOT_MODE === 'webhook' && (!SECRET_TOKEN || !WEBHOOK_PATH_RAW || !WEBHOOK_DOMAIN_RAW || !PORT_RAW)) {
+  throw new Error("Missing TELEGRAM_SECRET/WEBHOOK_PATH/WEBHOOK_DOMAIN/PORT in .env for webhook mode");
 }
+
+// Narrowed, definitely-defined values for use below (guaranteed by the checks above)
+const PORT = PORT_RAW as string;
+const WEBHOOK_PATH = WEBHOOK_PATH_RAW as string;
+const WEBHOOK_DOMAIN = WEBHOOK_DOMAIN_RAW as string;
 
 const OWNER_CHAT_IDS = OWNER_IDS_RAW.split(',').map(s=>s.trim()).filter(Boolean);
 if (!OWNER_CHAT_IDS.length) throw new Error("BOT_OWNER_CHAT_IDS has no valid entries.");
@@ -648,7 +653,7 @@ export async function startWebhookServer() {
   // Simple health
   app.get('/health', (_, res) => res.send('OK'));
 
-  app.listen(PORT, '127.0.0.1', async () => {
+  app.listen(Number(PORT), '127.0.0.1', async () => {
     console.log(`Listening on http://127.0.0.1:${PORT}`);
     console.log(`Webhook: ${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`);
 
@@ -659,7 +664,7 @@ export async function startWebhookServer() {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         url: `${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`,
-        secret_token: SECRET_TOKEN,
+        secret_token: SECRET_TOKEN_SAFE,
         max_connections: '100',
         allowed_updates: JSON.stringify([
           "message",
