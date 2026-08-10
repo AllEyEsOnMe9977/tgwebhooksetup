@@ -1,102 +1,131 @@
-# Telegram Webhook Modular Bot Setup
+# Telegram Webhook Bot Setup Script
+
+A single Bash installer (`setupPro.sh`) that turns a fresh Debian/Ubuntu server into a running Telegram bot. It asks you a series of questions, then provisions everything needed — nginx, TLS, an optional database, and a Node/TypeScript bot project — and starts the bot under `pm2` so it stays running and survives reboots.
+
+## Purpose
+
+Setting up a Telegram bot properly involves a lot of repetitive, error-prone steps: getting a domain behind HTTPS, writing an nginx reverse proxy, generating a webhook secret, wiring up a database, and configuring a process manager so the bot doesn't die when your SSH session closes. This script automates all of that in one interactive run, so you end up with a working, production-style bot instead of a pile of manual config.
+
+It supports two ways of receiving Telegram updates:
+
+- **Webhook mode** — Telegram pushes updates to a public HTTPS URL. The script sets up nginx + Let's Encrypt TLS for you. Best for VPS/servers with a public domain.
+- **Polling mode** — the bot connects outward to Telegram and pulls updates itself. No domain, nginx, or certificate needed. Best for local machines, home servers, or anything without a public IP.
+
+You can also run the script multiple times on the same server to add more bots — it detects existing nginx configs for a domain and adds a new route alongside them instead of overwriting anything.
+
+## Prerequisites
+
+- A Debian/Ubuntu server with `apt-get` (script exits early on other distros).
+- Root access (`sudo`).
+- A Telegram bot token from [@BotFather](https://t.me/BotFather).
+- For **webhook mode only**: a domain name pointing at the server's public IP, with ports 80 and 443 open.
+- Your Telegram numeric chat ID(s) — message [@userinfobot](https://t.me/userinfobot) to get yours.
 
 ## Installation
 
-**Recommended method (reliable, supports modular folders):**
-
 ```bash
 cd /opt
-rm -rf tgwebhooksetup   # (optional, if you want a fresh start)
+rm -rf tgwebhooksetup   # optional, only if a previous copy exists
 git clone https://github.com/AllEyEsOnMe9977/tgwebhooksetup.git
 cd tgwebhooksetup
-sudo bash setupPro.sh    # not ready_install.sh!
+sudo bash setupPro.sh
 ```
 
-## Features
+> Use `setupPro.sh`, not `ready_install.sh` — the latter is not the current installer.
 
-### Interactive setup
+## What the script asks you
 
-The installer asks for all required configuration values instead of relying on hardcoded settings. It validates the bot token format, the domain format, and owner chat IDs before proceeding, so misconfigured input is caught immediately rather than failing mid-install.
+Run it and answer each prompt. Defaults are shown in `[brackets]` — press Enter to accept them.
 
-### Two bot modes
+| Prompt | Notes |
+|---|---|
+| Telegram bot token | Validated against Telegram's token format before continuing. |
+| Bot mode: webhook or polling | `w` (default) or `p`. Determines whether nginx/TLS/domain questions appear at all. |
+| Project name | Used for folder naming, nginx snippet naming, and pm2 process naming. |
+| Public HTTPS domain *(webhook mode only)* | Must start with `https://`. |
+| Backend port *(webhook mode only)* | Leave blank to auto-pick a free local port. |
+| Custom webhook path *(webhook mode only)* | Leave blank to auto-generate an unguessable path (`/project_XXXXXX`). |
+| Install under `/opt/<project>`? | Otherwise installs in your current directory. |
+| Secret token | Leave blank to auto-generate a UUID, used to verify incoming webhook requests. |
+| Restrict to Telegram IP ranges? *(webhook mode only)* | Adds an nginx allowlist so only Telegram's servers can reach the endpoint. |
+| Owner chat ID(s) | **Required.** Comma-separated. These IDs get startup notifications and access to owner-only commands. |
+| Email for Let's Encrypt *(webhook mode only)* | Used by certbot for renewal notices. |
+| Run `npm install` now? | If no, you'll need to run it yourself later. |
+| Database choice | `none`, `sqlite` (zero setup, local file), or `mariadb` (installs and provisions a server-backed DB + user automatically). |
 
-- **Webhook mode** — Telegram pushes updates to a public HTTPS endpoint. Requires a domain and triggers the nginx/TLS setup described below.
-- **Polling mode** — the bot connects out to Telegram and pulls updates itself. No domain, nginx, or certificate is needed; useful for local setups or environments without a public IP.
+## What gets installed on the server
 
-### Automatic Nginx and TLS configuration
+- **nginx + certbot** (webhook mode only) — reverse proxy and free TLS certificate, auto-renewed with a reload hook.
+- **pm2** — process manager that keeps the bot running, restarts it on crash, and relaunches it on server reboot.
+- **mariadb-server** — only if you chose the MariaDB database option.
 
-For webhook mode, the script:
+## What gets generated in your project folder
 
-- Installs `nginx` and `certbot` if not already present.
-- Detects whether a server block already exists for the given domain and reuses it, or bootstraps a new one.
-- Obtains and installs a Let's Encrypt certificate via `certbot --nginx`, then rewrites the site config for HTTPS with HSTS, `X-Content-Type-Options`, and `Referrer-Policy` headers.
-- Adds a certbot renewal hook that automatically reloads nginx after certificate renewal.
+```
+<project-name>/
+├── .env                     # bot token, secret, owner IDs, webhook/DB settings (chmod 600)
+├── bot.ts                   # starter bot (Telegraf), webhook or polling logic depending on your choice
+├── db.ts                    # DB connection helper (only if sqlite/mariadb was chosen)
+├── package.json             # dependencies scoped to your choices (Express, DB driver, etc.)
+├── tsconfig.json
+├── ecosystem.config.cjs     # pm2 process definition (restart policy, log paths)
+├── .gitignore
+├── data/                    # sqlite file lives here (sqlite only)
+├── logs/                    # pm2 stdout/stderr logs
+└── scripts/
+    └── webhook-manage.sh    # webhook helper (webhook mode only)
+```
 
-### Modular per-project webhook routing
+The generated `bot.ts` is a real, working starter: it validates required env vars on boot, logs every incoming update (update ID, sender, chat, type, text), notifies all owner chat IDs when it comes online, and gates the `/start` command to owners only. It's meant as a foundation to build your actual bot logic on top of — not a placeholder.
 
-Instead of one monolithic nginx config, each project gets its own location snippet under `/etc/nginx/locations-<domain>/<project>.conf`, included automatically into the domain's server block. This allows multiple bots or webhook consumers to share the same domain without editing a shared config file by hand.
+## After installation
 
-### Automatic port and path selection
+The script starts the bot under `pm2` automatically and saves the process list so it survives reboots. Useful commands:
 
-- If no backend port is specified, the script finds a free local port automatically and verifies it isn't already in use.
-- If no custom webhook path is given, it generates one combining the project name with a random suffix, reducing the chance of path guessing by outside parties.
+```bash
+pm2 status                      # check the bot is running
+pm2 logs <project-name>         # tail live logs
+pm2 restart <project-name>      # restart after you edit bot.ts and rebuild
+```
 
-### Secret token generation
+If you edit `bot.ts` or `db.ts`, rebuild before restarting:
 
-If a webhook secret token is left blank, one is generated automatically (UUID-based) and used both in the `.env` file and in the `X-Telegram-Bot-Api-Secret-Token` verification check inside the generated bot code.
+```bash
+cd /opt/<project-name>
+npm run build
+pm2 restart <project-name>
+```
 
-### Optional Telegram IP allowlisting
+### Managing the webhook (webhook mode only)
 
-The script can restrict access to the webhook endpoint to Telegram's published IP ranges, rejecting requests from any other source at the nginx level.
+`scripts/webhook-manage.sh` wraps the Telegram Bot API for you:
 
-### Owner-based access control
+```bash
+./scripts/webhook-manage.sh info     # show current webhook status (getWebhookInfo)
+./scripts/webhook-manage.sh set      # (re)register the webhook URL + secret with Telegram
+./scripts/webhook-manage.sh delete   # remove the webhook (e.g. before switching to polling)
+./scripts/webhook-manage.sh test     # send a fake update straight to your local endpoint
+```
 
-The bot requires at least one owner chat ID at setup time. Generated bot code uses this list to gate privileged commands (for example `/start`) and to send a startup notification to each owner once the bot comes online.
+Run `set` if `getWebhookInfo` ever shows the wrong URL, or after changing the domain/path manually.
 
-### Optional database provisioning
+### Adding a second bot on the same domain
 
-Three database options are offered:
+Just re-run the installer with a different project name. It will detect the existing nginx server block for that domain, add a new location snippet under `/etc/nginx/locations-<domain>/`, and reload nginx — your first bot's config is left untouched.
 
-- **None** — no database is configured.
-- **SQLite** — a local file-based database; no server setup required. A `data/` directory and connection helper are created automatically.
-- **MariaDB** — installs `mariadb-server` if missing, then provisions a dedicated database and user with a generated password, all recorded in `.env`.
+## Re-running the script safely
 
-A matching `db.ts` connection helper is generated for SQLite or MariaDB, imported automatically by the bot entry point when a database is selected.
+The script is written to be idempotent where it matters:
 
-### Process management with pm2
+- Database creation uses `CREATE DATABASE IF NOT EXISTS` / `CREATE USER IF NOT EXISTS` — safe to re-run.
+- nginx include-directory wiring checks for an existing include line before adding one.
+- Existing server blocks for a domain are reused, not overwritten.
 
-The bot is started and supervised using `pm2` rather than a systemd unit:
+You can safely re-run it to add a new bot/project; it won't duplicate or break an existing one.
 
-- `pm2` is installed globally if not already present.
-- An `ecosystem.config.cjs` file defines restart policy (`max_restarts`, `min_uptime`, `restart_delay`) and log file locations under `logs/`.
-- The process list is saved and configured to resurrect automatically on system boot.
+## Troubleshooting
 
-### Generated project files
-
-Each run produces a self-contained Node/TypeScript project, including:
-
-- `.env` — all configuration values (bot token, secret, owner IDs, webhook details, database credentials), written with restrictive file permissions.
-- `bot.ts` — a working starter bot using Telegraf, with mode-specific logic (Express server for webhook mode, long-polling loop for polling mode) and startup owner notifications.
-- `db.ts` — database connection helper (only written if a database was selected).
-- `package.json` — dependencies scoped to the options chosen (Express only added for webhook mode, database drivers only added if selected).
-- `tsconfig.json` — TypeScript compiler configuration.
-- `ecosystem.config.cjs` — pm2 process definition.
-- `.gitignore` — excludes `node_modules/`, `.env`, and log files from version control.
-- `scripts/webhook-manage.sh` — helper for inspecting, setting, deleting, and testing the Telegram webhook (webhook mode only).
-
-### Webhook management helper
-
-`scripts/webhook-manage.sh` wraps common Telegram Bot API calls:
-
-- `info` — fetches current webhook status via `getWebhookInfo`.
-- `delete` — removes the webhook via `deleteWebhook`.
-- `set` — registers the webhook URL, secret token, and full `allowed_updates` list via `setWebhook`.
-- `test` — sends a sample update directly to the local endpoint to verify the pipeline end to end.
-
-### Idempotent re-runs
-
-Database provisioning (`CREATE DATABASE IF NOT EXISTS`, `CREATE USER IF NOT EXISTS`) and nginx include-directory setup are written to be safe to run again without duplicating configuration or failing on existing resources.
-
-### Logging
-
-The generated bot logs incoming updates (update ID, sender, chat, update type, message text) via Telegraf middleware, and logs outcomes of owner notifications, webhook registration, and database connection attempts, so failures are visible rather than silent.
+- **Certbot fails** — the script exits with an error rather than continuing without TLS, since Telegram requires HTTPS for webhooks. Fix DNS/firewall and re-run.
+- **Port already in use** — if you specify a port manually, the script checks it's free first and exits if not; leave the field blank to auto-pick one instead.
+- **Webhook not receiving updates** — run `./scripts/webhook-manage.sh info` to check Telegram's view of your webhook, and `pm2 logs <project-name>` to check the bot is actually receiving requests from nginx.
+- **MariaDB password** — auto-generated and saved only in `.env` (`chmod 600`). Check there if you need it.
