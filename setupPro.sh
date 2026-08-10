@@ -737,7 +737,8 @@ cat > "$PROJECT_DIR/package.json" <<EOF
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "tsx bot.ts",
+    "build": "tsc",
+    "start": "node dist/bot.js",
     "dev": "tsx watch bot.ts"
   },
   "dependencies": {
@@ -790,7 +791,7 @@ module.exports = {
       script: "bot.ts",
       cwd: "$PROJECT_DIR",
       interpreter: "node",
-      interpreter_args: "--import tsx",
+      script: "dist/bot.js",
       // Restart policy: keep it alive, but don't hot-loop-crash forever
       autorestart: true,
       max_restarts: 10,
@@ -817,11 +818,14 @@ if [[ "$DO_NPM" == "y" ]]; then
   if have npm; then
     msg "Installing npm dependencies ($DEPS)"
     (cd "$PROJECT_DIR" && npm install)
+
+    msg "Building TypeScript (tsc)"
+    (cd "$PROJECT_DIR" && npm run build) || die "TypeScript build failed. Fix errors in bot.ts/db.ts and re-run: cd \"$PROJECT_DIR\" && npm run build"
   else
-    warn "npm not found. Skipping npm install. Run later: cd \"$PROJECT_DIR\" && npm install"
+    warn "npm not found. Skipping npm install. Run later: cd \"$PROJECT_DIR\" && npm install && npm run build"
   fi
 else
-  msg "Skipping npm install (run later: cd \"$PROJECT_DIR\" && npm install)"
+  msg "Skipping npm install (run later: cd \"$PROJECT_DIR\" && npm install && npm run build)"
 fi
 
 # ---------- pm2 start (start bot under pm2 and persist across reboots) ----------
