@@ -597,7 +597,8 @@ bot.use(async (ctx, next) => {
     from: ctx.from?.id,
     chat: ctx.chat?.id,
     messageType: ctx.updateType,
-    text: ctx.message?.text || ctx.channelPost?.text,
+    text: ('text' in (ctx.message ?? {}) ? (ctx.message as any).text : undefined)
+      || ('text' in (ctx.channelPost ?? {}) ? (ctx.channelPost as any).text : undefined),
   });
   await next();
 });
@@ -729,6 +730,7 @@ DEPS='"dotenv": "^17.2.1", "telegraf": "^4.16.3"'
 
 DEV_DEPS='"typescript": "^5.7.3", "tsx": "^4.19.2", "@types/node": "^22.10.5"'
 [[ "$BOT_MODE" == "webhook" ]] && DEV_DEPS="$DEV_DEPS, \"@types/express\": \"^5.0.0\""
+[[ "$DB_TYPE" == "sqlite" ]] && DEV_DEPS="$DEV_DEPS, \"@types/better-sqlite3\": \"^7.6.11\""
 
 cat > "$PROJECT_DIR/package.json" <<EOF
 {
