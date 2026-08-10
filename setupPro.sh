@@ -583,6 +583,7 @@ if (BOT_MODE === 'webhook' && (!SECRET_TOKEN || !WEBHOOK_PATH_RAW || !WEBHOOK_DO
 const PORT = PORT_RAW as string;
 const WEBHOOK_PATH = WEBHOOK_PATH_RAW as string;
 const WEBHOOK_DOMAIN = WEBHOOK_DOMAIN_RAW as string;
+const SECRET_TOKEN_SAFE = SECRET_TOKEN as string;
 
 const OWNER_CHAT_IDS = OWNER_IDS_RAW.split(',').map(s=>s.trim()).filter(Boolean);
 if (!OWNER_CHAT_IDS.length) throw new Error("BOT_OWNER_CHAT_IDS has no valid entries.");
@@ -664,7 +665,7 @@ export async function startWebhookServer() {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         url: `${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`,
-        secret_token: SECRET_TOKEN,
+        secret_token: SECRET_TOKEN_SAFE,
         max_connections: '100',
         allowed_updates: JSON.stringify([
           "message",
