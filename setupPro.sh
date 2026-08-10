@@ -259,12 +259,12 @@ fi
 if [[ "$BOT_MODE" == "webhook" ]]; then
   msg "Installing nginx + certbot"
   apt-get update -qq
-  apt-get install -y -qq nginx certbot python3-certbot-nginx curl openssl ca-certificates
+  apt-get install -y -qq nginx certbot python3-certbot-nginx curl openssl ca-certificates python3
   systemctl enable --now nginx
 else
   msg "Installing base dependencies (polling mode, no nginx/certbot needed)"
   apt-get update -qq
-  apt-get install -y -qq curl openssl ca-certificates
+  apt-get install -y -qq curl openssl ca-certificates python3
 fi
 
 # ---------- pm2 (process manager, keeps bot running/restarting) ----------
@@ -838,8 +838,13 @@ fi
 
 # ---------- pm2 start (start bot under pm2 and persist across reboots) ----------
 if have pm2; then
-  msg "Starting bot under pm2"
-  (cd "$PROJECT_DIR" && pm2 start ecosystem.config.cjs)
+  if [[ -f "$PROJECT_DIR/dist/bot.js" ]]; then
+    msg "Starting bot under pm2"
+    (cd "$PROJECT_DIR" && pm2 start ecosystem.config.cjs)
+  else
+    warn "dist/bot.js not found (build was skipped or failed) — bot NOT started."
+    warn "Run manually: cd \"$PROJECT_DIR\" && npm install && npm run build && pm2 start ecosystem.config.cjs && pm2 save"
+  fi
   pm2 save
   # Configure pm2 to resurrect the saved process list on system boot.
   # 'pm2 startup' prints a command that must be run as root; since this
