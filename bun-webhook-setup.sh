@@ -835,6 +835,7 @@ chmod 644 "$PROJECT_DIR/tsconfig.json"
 cat > "$PROJECT_DIR/.gitignore" <<'EOF'
 node_modules/
 .env
+.bun/
 bun.lock
 bun.lockb
 logs/
