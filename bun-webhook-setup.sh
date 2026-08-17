@@ -175,7 +175,10 @@ if [[ -x /root/.bun/bin/bun ]]; then
   # /root is unreadable to the unprivileged service user, and ProtectHome=true
   # in the systemd unit blocks it too — a symlink into /usr/local/bin still
   # resolves through /root and fails the same way. Copy the actual binary out
-  # so nothing at runtime ever needs to touch /root.
+  # so nothing at runtime ever needs to touch /root. Remove any old symlink
+  # first — cp refuses to overwrite a destination that resolves to the same
+  # inode as the source (which a stale symlink from a prior run would do).
+  rm -f /usr/local/bin/bun
   cp -f /root/.bun/bin/bun /usr/local/bin/bun
   chmod 755 /usr/local/bin/bun
   BUN_BIN="/usr/local/bin/bun"
