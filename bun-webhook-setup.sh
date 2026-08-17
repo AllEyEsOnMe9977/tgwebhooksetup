@@ -810,9 +810,10 @@ EOF
 chmod 644 "$PROJECT_DIR/package.json"
 
 # ---------- tsconfig.json ----------
-# Bun type-checks against this but does not require a build/emit step —
-# it executes .ts source directly, same convenience Deno gave us.
-msg "Writing tsconfig.json"
+# Purely for editor/IDE support and optional `tsc --noEmit` type-checking in
+# CI. Bun ignores this at runtime — it transpiles and runs .ts directly
+# regardless of whether this file exists, same as Deno.
+msg "Writing tsconfig.json (editor/type-check support only, not required at runtime)"
 cat > "$PROJECT_DIR/tsconfig.json" <<'EOF'
 {
   "compilerOptions": {
