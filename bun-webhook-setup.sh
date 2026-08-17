@@ -172,10 +172,12 @@ fi
 # Resolve the absolute binary path once; prefer root's install location since
 # that's where the installer places it when this script runs as root.
 if [[ -x /root/.bun/bin/bun ]]; then
-  # /root is 0700 by default, unreadable to the unprivileged service user
-  # that will run this bot under systemd. Symlink into a world-traversable
-  # system path so ExecStart can actually exec it (avoids systemd 203/EXEC).
-  ln -sf /root/.bun/bin/bun /usr/local/bin/bun
+  # /root is unreadable to the unprivileged service user, and ProtectHome=true
+  # in the systemd unit blocks it too — a symlink into /usr/local/bin still
+  # resolves through /root and fails the same way. Copy the actual binary out
+  # so nothing at runtime ever needs to touch /root.
+  cp -f /root/.bun/bin/bun /usr/local/bin/bun
+  chmod 755 /usr/local/bin/bun
   BUN_BIN="/usr/local/bin/bun"
 elif have bun; then
   BUN_BIN="$(command -v bun)"
@@ -851,6 +853,9 @@ cat > "$SERVICE_FILE" <<EOF
 Description=${PROJECT_NAME} Telegram bot (Bun)
 After=network-online.target
 Wants=network-online.target
+# Cap restart storms: allow at most 10 restarts within a 60s window.
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -871,9 +876,6 @@ Environment=HOME=${PROJECT_DIR}
 ExecStart=${BUN_BIN} run start
 Restart=on-failure
 RestartSec=3
-# Cap restart storms: allow at most 10 restarts within a 60s window.
-StartLimitIntervalSec=60
-StartLimitBurst=10
 
 # Hardening: run as a dedicated unprivileged user, not root.
 User=${PROJECT_NAME}
