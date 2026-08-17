@@ -786,7 +786,7 @@ DEPS='"dotenv": "^17.2.1", "telegraf": "^4.16.3"'
 [[ "$DB_TYPE" == "mariadb" ]] && DEPS="$DEPS, \"mariadb\": \"^3.4.0\""
 # bun:sqlite is built into the Bun runtime; no dependency entry needed.
 
-DEV_DEPS='"@types/node": "^22.10.5"'
+DEV_DEPS='"@types/node": "^22.10.5", "bun-types": "latest"'
 [[ "$BOT_MODE" == "webhook" ]] && DEV_DEPS="$DEV_DEPS, \"@types/express\": \"^5.0.0\""
 
 cat > "$PROJECT_DIR/package.json" <<EOF
