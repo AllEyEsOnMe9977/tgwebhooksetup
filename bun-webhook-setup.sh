@@ -172,7 +172,11 @@ fi
 # Resolve the absolute binary path once; prefer root's install location since
 # that's where the installer places it when this script runs as root.
 if [[ -x /root/.bun/bin/bun ]]; then
-  BUN_BIN="/root/.bun/bin/bun"
+  # /root is 0700 by default, unreadable to the unprivileged service user
+  # that will run this bot under systemd. Symlink into a world-traversable
+  # system path so ExecStart can actually exec it (avoids systemd 203/EXEC).
+  ln -sf /root/.bun/bin/bun /usr/local/bin/bun
+  BUN_BIN="/usr/local/bin/bun"
 elif have bun; then
   BUN_BIN="$(command -v bun)"
 else
@@ -857,7 +861,7 @@ EnvironmentFile=${PROJECT_DIR}/.env
 # pointing at the bun binary. ExecStart itself uses the absolute path so
 # startup does not depend on PATH resolution at all; PATH is kept only in
 # case bot.ts or a dependency shells out expecting bun/node on PATH.
-Environment=PATH=/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # HOME is redirected into the project directory (already covered by
 # ReadWritePaths) rather than left as the service user's real home. ProtectHome
 # below makes /home inaccessible to this service, and Bun writes cache/config
