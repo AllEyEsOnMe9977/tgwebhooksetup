@@ -809,6 +809,7 @@ cat > "$PROJECT_DIR/.gitignore" <<'EOF'
 node_modules/
 .env
 deno.lock
+.deno-cache/
 logs/
 data/
 EOF
@@ -830,7 +831,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${PROJECT_DIR}
-EnvironmentFile=${PROJECT_DIR}/.env
+Environment=DENO_DIR=${PROJECT_DIR}/.deno-cache
 ExecStart=${DENO_BIN} task start
 Restart=on-failure
 RestartSec=3
@@ -871,7 +872,7 @@ read -rp "Cache Deno dependencies now (deno install)? (y/N): " DO_CACHE
 DO_CACHE=${DO_CACHE,,}
 if [[ "$DO_CACHE" == "y" ]]; then
   msg "Caching npm: dependencies via deno install"
-  (cd "$PROJECT_DIR" && sudo -u "$PROJECT_NAME" "$DENO_BIN" install) \
+  (cd "$PROJECT_DIR" && sudo -u "$PROJECT_NAME" env DENO_DIR="$PROJECT_DIR/.deno-cache" "$DENO_BIN" install) \
     || warn "deno install failed; it will run lazily on first 'systemctl start'."
 else
   msg "Skipping dependency cache (will fetch on first run)"
