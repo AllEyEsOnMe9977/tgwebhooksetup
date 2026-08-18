@@ -103,7 +103,7 @@ path, inc_line = sys.argv[1], sys.argv[2]
 with open(path) as f: text = f.read()
 idx = text.rfind('listen 443')
 if idx == -1:
-    print(text, end=''); sys.exit()
+    print(text, end=''); sys.exit(1)
 start = text.rfind('{', 0, idx)
 depth = 0
 for i in range(start, len(text)):
@@ -114,7 +114,9 @@ for i in range(start, len(text)):
             print(text[:i] + '\n' + inc_line + '\n' + text[i:], end='')
             sys.exit()
 print(text, end='')
-" "$server_file" "$inc_line" > "$server_file.tmp" && mv "$server_file.tmp" "$server_file"
+" "$server_file" "$inc_line" > "$server_file.tmp" \
+      && mv "$server_file.tmp" "$server_file" \
+      || die "Could not safely insert webhook include into $server_file. Edit it manually and re-run."
   fi
 }
 
@@ -255,11 +257,15 @@ else
   mkdir -p "$PROJECT_DIR"
 fi
 
-read -rp "Secret token for webhook verification (leave blank to auto-generate): " SECRET_TOKEN
-SECRET_TOKEN=${SECRET_TOKEN:-}
-if [[ -z "$SECRET_TOKEN" ]]; then
-  SECRET_TOKEN="$(gen_uuid)"
-  msg "Generated secret token: $SECRET_TOKEN"
+if [[ "$BOT_MODE" == "webhook" ]]; then
+  read -rp "Secret token for webhook verification (leave blank to auto-generate): " SECRET_TOKEN
+  SECRET_TOKEN=${SECRET_TOKEN:-}
+  if [[ -z "$SECRET_TOKEN" ]]; then
+    SECRET_TOKEN="$(gen_uuid)"
+    msg "Generated secret token: $SECRET_TOKEN"
+  fi
+else
+  SECRET_TOKEN=""
 fi
 
 if [[ "$BOT_MODE" == "webhook" ]]; then
@@ -326,6 +332,8 @@ if [[ "$DB_TYPE" == "mariadb" ]]; then
   fi
 
   # Create database and user idempotently (safe to re-run)
+  mysql -u root -e "SELECT 1;" >/dev/null 2>&1 \
+    || die "Cannot connect to MariaDB as root (unix_socket auth not configured). Fix root access and re-run."
   msg "Provisioning MariaDB database '$DB_NAME' and user '$DB_USER'"
   mysql -u root <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -625,7 +633,8 @@ const OWNER_IDS_RAW = process.env.BOT_OWNER_CHAT_IDS;
 
 if (!BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN in .env");
 if (!OWNER_IDS_RAW) throw new Error("Missing BOT_OWNER_CHAT_IDS in .env");
-if (BOT_MODE === 'webhook' && (!SECRET_TOKEN || !WEBHOOK_PATH_RAW || !WEBHOOK_DOMAIN_RAW || !PORT_RAW)) {
+$( if [[ "$BOT_MODE" == "webhook" ]]; then cat <<'ENVCHECK'
+if (!SECRET_TOKEN || !WEBHOOK_PATH_RAW || !WEBHOOK_DOMAIN_RAW || !PORT_RAW) {
   throw new Error("Missing TELEGRAM_SECRET/WEBHOOK_PATH/WEBHOOK_DOMAIN/PORT in .env for webhook mode");
 }
 
@@ -634,7 +643,8 @@ const PORT = PORT_RAW as string;
 const WEBHOOK_PATH = WEBHOOK_PATH_RAW as string;
 const WEBHOOK_DOMAIN = WEBHOOK_DOMAIN_RAW as string;
 const SECRET_TOKEN_SAFE = SECRET_TOKEN as string;
-
+ENVCHECK
+fi )
 const OWNER_CHAT_IDS = OWNER_IDS_RAW.split(',').map(s=>s.trim()).filter(Boolean);
 if (!OWNER_CHAT_IDS.length) throw new Error("BOT_OWNER_CHAT_IDS has no valid entries.");
 
@@ -910,22 +920,15 @@ chown -R "$PROJECT_NAME:$PROJECT_NAME" "$PROJECT_DIR"
 # .env holds secrets; keep it readable only by the service user and root.
 chmod 600 "$PROJECT_DIR/.env"
 
-# ---------- npm install (recommended; unlike Deno, Bun does NOT lazily ----------
-# fetch dependencies at runtime — bot.ts will fail to start without a
-# node_modules directory in place, so this step is effectively required
-# before the systemd service can succeed.
-read -rp "Run bun install now (required before the service can start)? (Y/n): " DO_INSTALL
-DO_INSTALL=${DO_INSTALL,,}
-if [[ "$DO_INSTALL" != "n" ]]; then
-  msg "Installing dependencies via bun install"
-  # Run as the dedicated service user so file ownership matches what the
-  # systemd unit will use, and so bun's per-user cache lands in the right home.
-  (cd "$PROJECT_DIR" && sudo -u "$PROJECT_NAME" env HOME="$PROJECT_DIR" "$BUN_BIN" install) \
-    || warn "bun install failed. Run manually before starting the service: cd \"$PROJECT_DIR\" && sudo -u $PROJECT_NAME env HOME=\"$PROJECT_DIR\" $BUN_BIN install"
-else
-  warn "Skipping bun install. The service WILL FAIL to start until you run:"
-  warn "  cd \"$PROJECT_DIR\" && sudo -u $PROJECT_NAME env HOME=\"$PROJECT_DIR\" $BUN_BIN install"
-fi
+# ---------- npm install (mandatory) ----------
+# Unlike Deno, Bun does NOT lazily fetch dependencies at runtime — bot.ts
+# will fail to start without node_modules in place, so this step is required
+# and cannot be skipped.
+msg "Installing dependencies via bun install (required)"
+# Run as the dedicated service user so file ownership matches what the
+# systemd unit will use, and so bun's per-user cache lands in the right home.
+(cd "$PROJECT_DIR" && sudo -u "$PROJECT_NAME" env HOME="$PROJECT_DIR" "$BUN_BIN" install) \
+  || die "bun install failed. Fix the error above and re-run the script."
 
 # ---------- start service ----------
 msg "Enabling and starting systemd service"
