@@ -379,7 +379,8 @@ if [[ -n "$EXISTING_LINK" ]]; then
   msg "Found existing server for $DOMAIN_CLEAN -> using $EXISTING_FILE"
   ensure_locations_include "$EXISTING_FILE" "$DOMAIN_CLEAN"
   write_webhook_snippet "$DOMAIN_CLEAN" "$PROJECT_NAME" "$WEBHOOK_PATH" "$PORT" "$SNIPPET"
-  nginx -t && systemctl reload nginx
+  nginx -t || die "nginx config test failed after edit — reverted state may be inconsistent, inspect $EXISTING_FILE manually."
+  systemctl reload nginx
   msg "Updated existing nginx config and reloaded."
 else
   # First-time setup for this domain
@@ -403,7 +404,8 @@ server {
 EOF
 
   ln -sf "$SITE_CONF" "$ENABLED_LINK"
-  nginx -t && systemctl reload nginx
+  nginx -t || die "nginx config test failed after edit — reverted state may be inconsistent, inspect $SITE_CONF manually."
+  systemctl reload nginx
 
   msg "Getting SSL cert with certbot..."
   if certbot --nginx -d "$DOMAIN_CLEAN" --non-interactive --agree-tos \
@@ -452,7 +454,8 @@ EOF
 
   # Write our first webhook snippet now
   write_webhook_snippet "$DOMAIN_CLEAN" "$PROJECT_NAME" "$WEBHOOK_PATH" "$PORT" "$SNIPPET"
-  nginx -t && systemctl reload nginx
+  nginx -t || die "nginx config test failed after edit — reverted state may be inconsistent, inspect $SITE_CONF manually."
+  systemctl reload nginx
 
   # Ensure nginx reloads automatically when certbot renews the certificate
   RENEWAL_HOOK="/etc/letsencrypt/renewal-hooks/post/reload-nginx.sh"
@@ -626,9 +629,9 @@ $( [[ "$DB_TYPE" != "none" ]] && echo "import './db.ts'; // initializes and logs
 const BOT_MODE = process.env.BOT_MODE || '$BOT_MODE';
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SECRET_TOKEN = process.env.TELEGRAM_SECRET;
-const PORT_RAW = process.env.PORT;
-const WEBHOOK_PATH_RAW = process.env.WEBHOOK_PATH;
-const WEBHOOK_DOMAIN_RAW = process.env.WEBHOOK_DOMAIN;
+const PORT = process.env.PORT;
+const WEBHOOK_PATH = process.env.WEBHOOK_PATH;
+const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 const OWNER_IDS_RAW = process.env.BOT_OWNER_CHAT_IDS;
 
 if (!BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN in .env");
@@ -638,11 +641,6 @@ if (!SECRET_TOKEN || !WEBHOOK_PATH_RAW || !WEBHOOK_DOMAIN_RAW || !PORT_RAW) {
   throw new Error("Missing TELEGRAM_SECRET/WEBHOOK_PATH/WEBHOOK_DOMAIN/PORT in .env for webhook mode");
 }
 
-// Narrowed, definitely-defined values for use below (guaranteed by the checks above)
-const PORT = PORT_RAW as string;
-const WEBHOOK_PATH = WEBHOOK_PATH_RAW as string;
-const WEBHOOK_DOMAIN = WEBHOOK_DOMAIN_RAW as string;
-const SECRET_TOKEN_SAFE = SECRET_TOKEN as string;
 ENVCHECK
 fi )
 const OWNER_CHAT_IDS = OWNER_IDS_RAW.split(',').map(s=>s.trim()).filter(Boolean);
@@ -725,7 +723,7 @@ export async function startWebhookServer() {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         url: `${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`,
-        secret_token: SECRET_TOKEN_SAFE,
+        secret_token: SECRET_TOKEN,
         max_connections: '100',
         allowed_updates: JSON.stringify([
           "message",
