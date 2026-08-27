@@ -615,7 +615,7 @@ fi
 # ---------- tgApi.ts (copied from repo template) ----------
 msg "Copying tgApi.ts (Telegram Bot API wrapper) into project"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TGAPI_SRC="$SCRIPT_DIR/tg/tgApi.ts"
+TGAPI_SRC="$SCRIPT_DIR/templates/templateBun/tg/tgApi.ts"
 if [[ -f "$TGAPI_SRC" ]]; then
   cp -f "$TGAPI_SRC" "$PROJECT_DIR/tgApi.ts"
   chmod 640 "$PROJECT_DIR/tgApi.ts"
