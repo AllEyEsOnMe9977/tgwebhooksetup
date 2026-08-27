@@ -555,6 +555,34 @@ else
   msg "Skipping webhook-manage.sh (not applicable in polling mode)"
 fi
 
+# ---------- update-tgapi.sh (pulls latest tgApi.ts from the repo template) ----------
+msg "Writing update-tgapi.sh helper"
+mkdir -p "$SCRIPTS_DIR"
+umask 077
+cat > "$SCRIPTS_DIR/update-tgapi.sh" <<EOF
+#!/usr/bin/env bash
+# Re-copies tg/tgApi.ts from the repo template into this project, then
+# restarts the systemd service so the running bot picks up the change.
+# Source of truth: $TGAPI_SRC
+set -euo pipefail
+
+TGAPI_SRC="$TGAPI_SRC"
+DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")"/.. && pwd)"
+SERVICE="$PROJECT_NAME"
+
+[[ -f "\$TGAPI_SRC" ]] || { echo "[ERROR] Template not found at \$TGAPI_SRC" >&2; exit 1; }
+
+echo "[INFO] Copying \$TGAPI_SRC -> \$DIR/tg/tgApi.ts"
+cp -f "\$TGAPI_SRC" "\$DIR/tg/tgApi.ts"
+chmod 640 "\$DIR/tg/tgApi.ts"
+chown "\$SERVICE:\$SERVICE" "\$DIR/tg/tgApi.ts" 2>/dev/null || true
+
+echo "[INFO] Restarting service: \$SERVICE"
+systemctl restart "\$SERVICE"
+systemctl --no-pager status "\$SERVICE" | head -n 10
+EOF
+chmod 700 "$SCRIPTS_DIR/update-tgapi.sh"
+
 # ---------- db.ts (only written if a DB was selected) ----------
 if [[ "$DB_TYPE" == "sqlite" ]]; then
   msg "Writing db.ts (bun:sqlite — built into Bun, no external package)"
