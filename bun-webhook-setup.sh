@@ -616,11 +616,12 @@ fi
 msg "Copying tgApi.ts (Telegram Bot API wrapper) into project"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TGAPI_SRC="$SCRIPT_DIR/templates/templateBun/tg/tgApi.ts"
+mkdir -p "$PROJECT_DIR/tg"
 if [[ -f "$TGAPI_SRC" ]]; then
-  cp -f "$TGAPI_SRC" "$PROJECT_DIR/tgApi.ts"
-  chmod 640 "$PROJECT_DIR/tgApi.ts"
+  cp -f "$TGAPI_SRC" "$PROJECT_DIR/tg/tgApi.ts"
+  chmod 640 "$PROJECT_DIR/tg/tgApi.ts"
 else
-  die "tgApi.ts template not found at $TGAPI_SRC. Place it at templateBun/tg/tgApi.ts relative to this script."
+  die "tgApi.ts template not found at $TGAPI_SRC. Place it at templates/templateBun/tg/tgApi.ts relative to this script."
 fi
 
 
@@ -631,7 +632,7 @@ cat > "$PROJECT_DIR/bot.ts" <<EOF
 // Uses tgApi.ts (raw Bot API wrapper) instead of Telegraf, for faster
 // adaptation to upstream Telegram Bot API changes.
 import 'dotenv/config';
-import { TelegramAPI } from './tgApi.ts';
+import { TelegramAPI } from './tg/tgApi.ts';
 $( [[ "$BOT_MODE" == "webhook" ]] && echo "import express from 'express';" )
 $( [[ "$DB_TYPE" != "none" ]] && echo "import './db.ts'; // initializes and logs DB connection on import" )
 
