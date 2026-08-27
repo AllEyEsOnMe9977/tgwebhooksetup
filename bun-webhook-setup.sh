@@ -485,6 +485,9 @@ TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 TELEGRAM_SECRET=$SECRET_TOKEN
 # Comma-separated list (e.g. 12345,-1001234567890)
 BOT_OWNER_CHAT_IDS=$OWNER_IDS
+# Set to 1 to log every tgApi.ts request/response in full (verbose, noisy).
+# Leave 0 for compact logging (recommended for normal operation).
+DEBUG_TG_API=0
 
 # --- Webhook / server (unused when BOT_MODE=polling) ---
 WEBHOOK_DOMAIN=$WEBHOOK_DOMAIN

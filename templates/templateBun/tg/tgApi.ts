@@ -152,6 +152,7 @@ export interface InputRichMessage {
 export class TelegramAPI {
   private readonly API_URL: string;
   private readonly logger: Logger;
+  private readonly debug: boolean;
   private _meCache?: GetMeResult;
 
   /**
@@ -162,7 +163,27 @@ export class TelegramAPI {
     if (!botToken) throw new Error('Bot token is required');
     this.API_URL = `https://api.telegram.org/bot${botToken}`;
     this.logger = logger;
+    // Verbose mode: full request/response logging, including quiet getUpdates
+    // polls. Off by default to keep journald readable; set DEBUG_TG_API=1
+    // (or "true") in .env to restore full visibility while debugging.
+    this.debug = process.env.DEBUG_TG_API === '1' || process.env.DEBUG_TG_API === 'true';
   }
+
+  /**
+   * Compact a payload/result for logging: single-line JSON, truncated so
+   * large arrays (allowed_updates, media groups, etc.) don't flood the console.
+   */
+  private _compactPayload(value: unknown, maxLen: number = 300): string {
+    if (value === undefined) return '';
+    let str: string;
+    try {
+      str = JSON.stringify(value);
+    } catch {
+      str = String(value);
+    }
+    return str.length > maxLen ? `${str.slice(0, maxLen)}…(${str.length} chars)` : str;
+  }
+
 
   /**
    * Generic GET/POST wrapper with retries, rate-limit handling, and logging.
@@ -191,7 +212,14 @@ export class TelegramAPI {
     // Inside _call(method, data = {}, isPost = true)
     while (true) {
       try {
-        this.logger.info(`→ [${method}] Request`, { url: requestUrl, payload: data });
+        // Don't spam logs every 30s for empty long-polls — only log when there's
+        // something to say (non-getUpdates calls, or getUpdates with actual updates).
+        // DEBUG_TG_API=1 overrides this and logs every request in full.
+        if (this.debug) {
+          this.logger.info(`→ [${method}] Request`, { url: requestUrl, payload: data });
+        } else if (method !== 'getUpdates') {
+          this.logger.info(`→ [${method}]`, this._compactPayload(data));
+        }
         const res: Response = await fetch(requestUrl, options);
         const text = await res.text().catch(() => null);
 
@@ -278,7 +306,15 @@ export class TelegramAPI {
           throw new Error(`Telegram API Error ${code}: ${desc}`);
         }
 
-        this.logger.info(`← [${method}] Success`, { result: json.result });
+        if (this.debug) {
+          this.logger.info(`← [${method}] Success`, { result: json.result });
+        } else if (method === 'getUpdates') {
+          const count = Array.isArray(json.result) ? json.result.length : 0;
+          if (count > 0) this.logger.info(`← [getUpdates] ${count} update(s)`);
+          // else: silent — this is the expected steady-state case, not worth a log line
+        } else {
+          this.logger.info(`← [${method}] OK`, this._compactPayload(json.result));
+        }
         return json.result as T;
       } catch (err: any) {
         // Network or parsing failures
