@@ -559,6 +559,10 @@ else
 fi
 
 # ---------- update-tgapi.sh (pulls latest tgApi.ts from the repo template) ----------
+# Recompute here rather than relying on the variable set earlier in the
+# script — keeps this block self-contained and immune to scope issues.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TGAPI_SRC="$SCRIPT_DIR/templates/templateBun/tg/tgApi.ts"
 msg "Writing update-tgapi.sh helper"
 mkdir -p "$SCRIPTS_DIR"
 umask 077
