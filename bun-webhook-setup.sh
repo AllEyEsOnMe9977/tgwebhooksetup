@@ -612,16 +612,26 @@ EOF
   chmod 640 "$PROJECT_DIR/db.ts"
 fi
 
+# ---------- tgApi.ts (copied from repo template) ----------
+msg "Copying tgApi.ts (Telegram Bot API wrapper) into project"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TGAPI_SRC="$SCRIPT_DIR/tg/tgApi.ts"
+if [[ -f "$TGAPI_SRC" ]]; then
+  cp -f "$TGAPI_SRC" "$PROJECT_DIR/tgApi.ts"
+  chmod 640 "$PROJECT_DIR/tgApi.ts"
+else
+  die "tgApi.ts template not found at $TGAPI_SRC. Place it at templateBun/tg/tgApi.ts relative to this script."
+fi
+
+
 # ---------- bot.ts (NOT executed) ----------
 msg "Writing bot.ts (not executed) - mode: $BOT_MODE, db: $DB_TYPE"
 cat > "$PROJECT_DIR/bot.ts" <<EOF
 // bot.ts - auto-generated starter (mode: $BOT_MODE, db: $DB_TYPE)
-// Runtime: Bun. Dependencies are installed normally via 'bun install' and
-// imported with standard bare specifiers — Bun's npm compatibility is deep
-// enough (including native addon support) that no special import syntax
-// or workaround packages are needed, unlike under Deno.
+// Uses tgApi.ts (raw Bot API wrapper) instead of Telegraf, for faster
+// adaptation to upstream Telegram Bot API changes.
 import 'dotenv/config';
-import { Telegraf } from 'telegraf';
+import { TelegramAPI } from './tgApi.ts';
 $( [[ "$BOT_MODE" == "webhook" ]] && echo "import express from 'express';" )
 $( [[ "$DB_TYPE" != "none" ]] && echo "import './db.ts'; // initializes and logs DB connection on import" )
 
@@ -637,7 +647,7 @@ const OWNER_IDS_RAW = process.env.BOT_OWNER_CHAT_IDS;
 if (!BOT_TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN in .env");
 if (!OWNER_IDS_RAW) throw new Error("Missing BOT_OWNER_CHAT_IDS in .env");
 $( if [[ "$BOT_MODE" == "webhook" ]]; then cat <<'ENVCHECK'
-if (!SECRET_TOKEN || !WEBHOOK_PATH_RAW || !WEBHOOK_DOMAIN_RAW || !PORT_RAW) {
+if (!SECRET_TOKEN || !WEBHOOK_PATH || !WEBHOOK_DOMAIN || !PORT) {
   throw new Error("Missing TELEGRAM_SECRET/WEBHOOK_PATH/WEBHOOK_DOMAIN/PORT in .env for webhook mode");
 }
 
@@ -652,34 +662,41 @@ console.log('Bot mode:', BOT_MODE);
 // ──────────────────────────────────────────────────────────────────────────────
 // Bot instance
 // ──────────────────────────────────────────────────────────────────────────────
-export const bot = new Telegraf(BOT_TOKEN);
+export const tg = new TelegramAPI(BOT_TOKEN, { logger: console });
 
-// Simple debug middleware
-bot.use(async (ctx, next) => {
+// Simple debug logger for an incoming update
+function logUpdate(update: any) {
+  const msg = update.message || update.edited_message || update.channel_post || update.edited_channel_post;
   console.log('Incoming update:', {
-    updateId: ctx.update.update_id,
-    from: ctx.from?.id,
-    chat: ctx.chat?.id,
-    messageType: ctx.updateType,
-    text: ('text' in (ctx.message ?? {}) ? (ctx.message as any).text : undefined)
-      || ('text' in (ctx.channelPost ?? {}) ? (ctx.channelPost as any).text : undefined),
+    updateId: update.update_id,
+    from: msg?.from?.id,
+    chat: msg?.chat?.id,
+    text: msg?.text,
   });
-  await next();
-});
+}
 
-// Example owner-only /start
-bot.command('start', async (ctx) => {
-  if (OWNER_CHAT_IDS.includes(String(ctx.from.id))) {
-    await ctx.reply('Owner /start: bot is ready.');
-  } else {
+// Route a single update to command handlers
+async function handleUpdate(update: any) {
+  logUpdate(update);
+
+  const msg = update.message;
+  if (msg?.text === '/start') {
+    if (OWNER_CHAT_IDS.includes(String(msg.from.id))) {
+      await tg.sendMessage(msg.chat.id, 'Owner /start: bot is ready.');
+    }
     return;
   }
-});
+
+  if (update.callback_query) {
+    // Always ack callback queries, even no-ops, or Telegram shows a loading spinner client-side.
+    await tg.answerCallbackQuery(update.callback_query.id);
+  }
+}
 
 async function notifyOwnersOnStartup() {
   for (const chatId of OWNER_CHAT_IDS) {
     try {
-      await bot.telegram.sendMessage(chatId, 'Bot started successfully!');
+      await tg.sendMessage(chatId, 'Bot started successfully!');
       console.log(\`Notified owner \${chatId}\`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -687,6 +704,15 @@ async function notifyOwnersOnStartup() {
     }
   }
 }
+
+const ALLOWED_UPDATES = [
+  "message","edited_message","channel_post","edited_channel_post",
+  "business_connection","business_message","edited_business_message",
+  "deleted_business_messages","message_reaction","message_reaction_count",
+  "inline_query","chosen_inline_result","callback_query","shipping_query",
+  "pre_checkout_query","purchased_paid_media","poll","poll_answer",
+  "my_chat_member","chat_member","chat_join_request","chat_boost","removed_chat_boost"
+];
 
 $( if [[ "$BOT_MODE" == "webhook" ]]; then cat <<'WEBHOOKFN'
 // ──────────────────────────────────────────────────────────────────────────────
@@ -696,20 +722,22 @@ export async function startWebhookServer() {
   const app = express();
   app.use(express.json());
 
-  // Secret header check (Telegram sets this if setWebhook used secret_token)
-  app.post(WEBHOOK_PATH, (req, res, next) => {
+  app.post(WEBHOOK_PATH, async (req, res) => {
+    // Secret header check (Telegram sets this if setWebhook used secret_token)
     const header = req.get('x-telegram-bot-api-secret-token');
     if (header !== SECRET_TOKEN) {
       console.warn('Unauthorized webhook attempt with wrong secret');
       return res.status(401).json({ ok: false, error: 'Unauthorized' });
     }
-    return next();
+    // Ack immediately; Telegram only cares about the HTTP response, not its content.
+    res.sendStatus(200);
+    try {
+      await handleUpdate(req.body);
+    } catch (err) {
+      console.error('Error handling update:', err);
+    }
   });
 
-  // Hand off to Telegraf
-  app.post(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
-
-  // Simple health
   app.get('/health', (_, res) => res.send('OK'));
 
   app.listen(Number(PORT), '127.0.0.1', async () => {
@@ -718,46 +746,17 @@ export async function startWebhookServer() {
 
     await notifyOwnersOnStartup();
 
-    const resp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        url: `${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`,
-        secret_token: SECRET_TOKEN,
-        max_connections: '100',
-        allowed_updates: JSON.stringify([
-          "message",
-          "edited_message",
-          "channel_post",
-          "edited_channel_post",
-          "business_connection",
-          "business_message",
-          "edited_business_message",
-          "deleted_business_messages",
-          "message_reaction",
-          "message_reaction_count",
-          "inline_query",
-          "chosen_inline_result",
-          "callback_query",
-          "shipping_query",
-          "pre_checkout_query",
-          "purchased_paid_media",
-          "poll",
-          "poll_answer",
-          "my_chat_member",
-          "chat_member",
-          "chat_join_request",
-          "chat_boost",
-          "removed_chat_boost"
-        ]),
-        drop_pending_updates: 'true',
-      }),
+    await tg.setWebhook(`${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`, {
+      secret_token: SECRET_TOKEN,
+      max_connections: 100,
+      allowed_updates: ALLOWED_UPDATES,
+      drop_pending_updates: true,
     });
-    console.log('setWebhook response:', await resp.json());
+    console.log('Webhook registered.');
   });
 
-  process.once("SIGINT", () => { bot.stop("SIGINT"); });
-  process.once("SIGTERM", () => { bot.stop("SIGTERM"); });
+  process.once("SIGINT", () => process.exit(0));
+  process.once("SIGTERM", () => process.exit(0));
 }
 
 startWebhookServer();
@@ -768,18 +767,39 @@ else cat <<'POLLINGFN'
 // ──────────────────────────────────────────────────────────────────────────────
 export async function startPolling() {
   await notifyOwnersOnStartup();
-  await bot.launch();
-  console.log('Bot is polling for updates.');
-}
+  // Make sure no webhook is set — polling and webhook are mutually exclusive.
+  await tg.deleteWebhook();
 
-process.once("SIGINT", () => { bot.stop("SIGINT"); });
-process.once("SIGTERM", () => { bot.stop("SIGTERM"); });
+  let offset = 0;
+  let running = true;
+  process.once("SIGINT", () => { running = false; });
+  process.once("SIGTERM", () => { running = false; });
+
+  console.log('Bot is polling for updates.');
+  while (running) {
+    try {
+      const updates: any[] = await tg.getUpdates({
+        offset,
+        timeout: 30,
+        allowed_updates: ALLOWED_UPDATES,
+      });
+      for (const update of updates) {
+        offset = update.update_id + 1;
+        await handleUpdate(update);
+      }
+    } catch (err) {
+      console.error('Polling error:', err);
+      await new Promise(r => setTimeout(r, 2000)); // backoff before retrying
+    }
+  }
+}
 
 startPolling();
 POLLINGFN
 fi )
 EOF
 chmod 640 "$PROJECT_DIR/bot.ts"
+
 
 # ---------- package.json ----------
 # Bun runs .ts directly (no tsc build step needed, same benefit as Deno here),
@@ -789,12 +809,12 @@ msg "Writing package.json (mode: $BOT_MODE, db: $DB_TYPE)"
 umask 022
 
 # Build the dependencies list based on selected options.
-DEPS='"dotenv": "^17.2.1", "telegraf": "^4.16.3"'
+DEPS='"dotenv": "^17.2.1", "node-fetch": "^2.7.0"'
 [[ "$BOT_MODE" == "webhook" ]] && DEPS="$DEPS, \"express\": \"^5.2.1\""
 [[ "$DB_TYPE" == "mariadb" ]] && DEPS="$DEPS, \"mariadb\": \"^3.4.0\""
 # bun:sqlite is built into the Bun runtime; no dependency entry needed.
 
-DEV_DEPS='"@types/node": "^22.10.5", "bun-types": "latest"'
+DEV_DEPS='"@types/node": "^22.10.5", "bun-types": "latest", "@types/node-fetch": "^2.6.11"'
 [[ "$BOT_MODE" == "webhook" ]] && DEV_DEPS="$DEV_DEPS, \"@types/express\": \"^5.0.0\""
 
 cat > "$PROJECT_DIR/package.json" <<EOF
