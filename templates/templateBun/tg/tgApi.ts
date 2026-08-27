@@ -89,6 +89,67 @@ export interface GetMeResult {
   [key: string]: unknown;
 }
 
+// ===== Rich Messages Interfaces =====
+
+export interface RichTextButton {
+  text: string;
+  style?: 'primary' | 'success' | 'danger' | 'link';
+  url?: string;
+  callback_data?: string;
+}
+
+export interface RichTableCell {
+  type: 'text';
+  text: string | { type: 'button'; button: RichTextButton };
+}
+
+export interface RichBlockPhoto {
+  type: 'photo';
+  photo: {
+    type: 'photo';
+    media: string;
+  };
+}
+
+export interface RichBlockParagraph {
+  type: 'paragraph';
+  text: string;
+}
+
+export interface RichBlockExpandableBlockquote {
+  type: 'expandable_blockquote';
+  text: string;
+}
+
+export interface RichBlockTable {
+  type: 'table';
+  is_bordered?: boolean;
+  is_striped?: boolean;
+  is_compact?: boolean;
+  cells: RichTableCell[][];
+}
+
+export interface RichBlockButtons {
+  type: 'buttons';
+  align?: 'left' | 'center' | 'right';
+  buttons: Array<{
+    text: string;
+    url?: string;
+    callback_data?: string;
+  }>;
+}
+
+export type InputRichBlock =
+  | RichBlockPhoto
+  | RichBlockParagraph
+  | RichBlockExpandableBlockquote
+  | RichBlockTable
+  | RichBlockButtons;
+
+export interface InputRichMessage {
+  blocks: InputRichBlock[];
+}
+
 export class TelegramAPI {
   private readonly API_URL: string;
   private readonly logger: Logger;
@@ -241,6 +302,26 @@ export class TelegramAPI {
   // ===== Messaging =====
   sendMessage(chat_id: number | string, text: string, options: TelegramParams = {}) {
     return this._call('sendMessage', { chat_id, text, ...options });
+  }
+
+  /**
+   * Sends a structured rich message using modular JSON blocks.
+   * @param chat_id Target chat ID.
+   * @param rich_message The InputRichMessage object containing an array of blocks.
+   * @param options Additional Telegram parameters.
+   */
+  sendRichMessage(chat_id: number | string, rich_message: InputRichMessage, options: TelegramParams = {}) {
+    return this._call('sendRichMessage', { chat_id, rich_message, ...options });
+  }
+
+  /**
+   * Sends a temporary streaming draft of a rich message.
+   * @param chat_id Target chat ID.
+   * @param rich_message The InputRichMessage object containing an array of blocks.
+   * @param options Additional Telegram parameters.
+   */
+  sendRichMessageDraft(chat_id: number | string, rich_message: InputRichMessage, options: TelegramParams = {}) {
+    return this._call('sendRichMessageDraft', { chat_id, rich_message, ...options });
   }
 
   forwardMessage(chat_id: number | string, from_chat_id: number | string, message_id: number, options: TelegramParams = {}) {
