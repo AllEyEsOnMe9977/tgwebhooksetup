@@ -1,5 +1,4 @@
 // tg/api.ts
-import fetch, { Response } from 'node-fetch';
 import fs from 'fs';
 
 /** Minimal logger interface (compatible with console). */

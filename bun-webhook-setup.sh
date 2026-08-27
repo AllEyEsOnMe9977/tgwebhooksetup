@@ -838,12 +838,12 @@ msg "Writing package.json (mode: $BOT_MODE, db: $DB_TYPE)"
 umask 022
 
 # Build the dependencies list based on selected options.
-DEPS='"dotenv": "^17.2.1", "node-fetch": "^2.7.0"'
+DEPS='"dotenv": "^17.2.1"'
 [[ "$BOT_MODE" == "webhook" ]] && DEPS="$DEPS, \"express\": \"^5.2.1\""
 [[ "$DB_TYPE" == "mariadb" ]] && DEPS="$DEPS, \"mariadb\": \"^3.4.0\""
 # bun:sqlite is built into the Bun runtime; no dependency entry needed.
 
-DEV_DEPS='"@types/node": "^22.10.5", "bun-types": "latest", "@types/node-fetch": "^2.6.11"'
+DEV_DEPS='"@types/node": "^22.10.5", "bun-types": "latest"'
 [[ "$BOT_MODE" == "webhook" ]] && DEV_DEPS="$DEV_DEPS, \"@types/express\": \"^5.0.0\""
 
 cat > "$PROJECT_DIR/package.json" <<EOF
