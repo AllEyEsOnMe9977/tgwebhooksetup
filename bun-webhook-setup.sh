@@ -562,27 +562,27 @@ fi
 # Recompute here rather than relying on the variable set earlier in the
 # script — keeps this block self-contained and immune to scope issues.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TGAPI_SRC="$SCRIPT_DIR/templates/templateBun/tg/tgApi.ts"
+TG_SRC_DIR="$SCRIPT_DIR/templates/templateBun/tg"
 msg "Writing update-tgapi.sh helper"
 mkdir -p "$SCRIPTS_DIR"
 umask 077
 cat > "$SCRIPTS_DIR/update-tgapi.sh" <<EOF
 #!/usr/bin/env bash
-# Re-copies tg/tgApi.ts from the repo template into this project, then
-# restarts the systemd service so the running bot picks up the change.
-# Source of truth: $TGAPI_SRC
+# Re-copies all tg/*.ts modules from the repo template into this project,
+# then restarts the systemd service so the running bot picks up the change.
+# Source of truth: $TG_SRC_DIR
 set -euo pipefail
 
-TGAPI_SRC="$TGAPI_SRC"
+TG_SRC_DIR="$TG_SRC_DIR"
 DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")"/.. && pwd)"
 SERVICE="$PROJECT_NAME"
 
-[[ -f "\$TGAPI_SRC" ]] || { echo "[ERROR] Template not found at \$TGAPI_SRC" >&2; exit 1; }
+[[ -f "\$TG_SRC_DIR/tgApi.ts" ]] || { echo "[ERROR] Template not found at \$TG_SRC_DIR" >&2; exit 1; }
 
-echo "[INFO] Copying \$TGAPI_SRC -> \$DIR/tg/tgApi.ts"
-cp -f "\$TGAPI_SRC" "\$DIR/tg/tgApi.ts"
-chmod 640 "\$DIR/tg/tgApi.ts"
-chown "\$SERVICE:\$SERVICE" "\$DIR/tg/tgApi.ts" 2>/dev/null || true
+echo "[INFO] Copying \$TG_SRC_DIR/*.ts -> \$DIR/tg/"
+cp -f "\$TG_SRC_DIR"/*.ts "\$DIR/tg/"
+chmod 640 "\$DIR/tg"/*.ts
+chown "\$SERVICE:\$SERVICE" "\$DIR/tg"/*.ts 2>/dev/null || true
 
 echo "[INFO] Restarting service: \$SERVICE"
 systemctl restart "\$SERVICE"
@@ -648,17 +648,16 @@ EOF
 fi
 
 # ---------- tgApi.ts (copied from repo template) ----------
-msg "Copying tgApi.ts (Telegram Bot API wrapper) into project"
+msg "Copying tg/ module (Telegram Bot API wrapper) into project"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TGAPI_SRC="$SCRIPT_DIR/templates/templateBun/tg/tgApi.ts"
+TG_SRC_DIR="$SCRIPT_DIR/templates/templateBun/tg"
 mkdir -p "$PROJECT_DIR/tg"
-if [[ -f "$TGAPI_SRC" ]]; then
-  cp -f "$TGAPI_SRC" "$PROJECT_DIR/tg/tgApi.ts"
-  chmod 640 "$PROJECT_DIR/tg/tgApi.ts"
+if [[ -f "$TG_SRC_DIR/tgApi.ts" ]]; then
+  cp -f "$TG_SRC_DIR"/*.ts "$PROJECT_DIR/tg/"
+  chmod 640 "$PROJECT_DIR/tg"/*.ts
 else
-  die "tgApi.ts template not found at $TGAPI_SRC. Place it at templates/templateBun/tg/tgApi.ts relative to this script."
+  die "tg module not found at $TG_SRC_DIR. Place tgApi.ts, httpClient.ts, messaging.ts, chatInfo.ts, files.ts, webhook.ts, mixin.ts, types.ts under templates/templateBun/tg/ relative to this script."
 fi
-
 
 # ---------- bot.ts (NOT executed) ----------
 msg "Writing bot.ts (not executed) - mode: $BOT_MODE, db: $DB_TYPE"
