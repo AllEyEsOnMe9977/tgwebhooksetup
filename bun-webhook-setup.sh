@@ -590,6 +590,23 @@ systemctl --no-pager status "\$SERVICE" | head -n 10
 EOF
 chmod 700 "$SCRIPTS_DIR/update-tgapi.sh"
 
+# ---------- modular dev structure (empty folders) ----------
+msg "Creating modular folder structure for handler/service development"
+mkdir -p \
+  "$PROJECT_DIR/handlers/commands" \
+  "$PROJECT_DIR/handlers/callbacks" \
+  "$PROJECT_DIR/handlers/events" \
+  "$PROJECT_DIR/middlewares" \
+  "$PROJECT_DIR/services" \
+  "$PROJECT_DIR/models" \
+  "$PROJECT_DIR/utils" \
+  "$PROJECT_DIR/config"
+
+# .gitkeep so git tracks the otherwise-empty dirs
+for d in handlers/commands handlers/callbacks handlers/events middlewares services models utils config; do
+  touch "$PROJECT_DIR/$d/.gitkeep"
+done
+
 # ---------- db.ts (only written if a DB was selected) ----------
 if [[ "$DB_TYPE" == "sqlite" ]]; then
   msg "Writing db.ts (bun:sqlite — built into Bun, no external package)"
